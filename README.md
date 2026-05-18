@@ -1,5 +1,9 @@
 # SmallCode
 
+[简体中文](README_zh-CN.md) | [English](README.md)
+
+---
+
 [![npm](https://img.shields.io/npm/v/smallcode)](https://www.npmjs.com/package/smallcode)
 
 **AI coding agent optimized for small LLMs (≤20B parameters)**
