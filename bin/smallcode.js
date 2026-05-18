@@ -9,27 +9,37 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-// Load .env file from project root (simple dotenv without dependency)
+// Load .env file (checks multiple locations, first found wins)
 (function loadDotenv() {
-  const envPath = path.join(process.cwd(), '.env');
-  if (!fs.existsSync(envPath)) return;
-  try {
-    const content = fs.readFileSync(envPath, 'utf-8');
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eqIdx = trimmed.indexOf('=');
-      if (eqIdx === -1) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      let value = trimmed.slice(eqIdx + 1).trim();
-      // Remove surrounding quotes
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
+  const os = require('os');
+  const envPaths = [
+    path.join(process.cwd(), '.env'),                          // project root
+    path.join(process.cwd(), '.smallcode', '.env'),            // .smallcode dir
+    path.join(os.homedir(), '.config', 'smallcode', '.env'),   // global config
+    path.join(os.homedir(), '.smallcode', '.env'),             // global alt
+  ];
+
+  for (const envPath of envPaths) {
+    if (!fs.existsSync(envPath)) continue;
+    try {
+      const content = fs.readFileSync(envPath, 'utf-8');
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx === -1) continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        let value = trimmed.slice(eqIdx + 1).trim();
+        // Remove surrounding quotes
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        // Don't override existing env vars
+        if (!process.env[key]) process.env[key] = value;
       }
-      // Don't override existing env vars
-      if (!process.env[key]) process.env[key] = value;
-    }
-  } catch {}
+      break; // Use first found .env file
+    } catch {}
+  }
 })();
 const readline = require('readline');
 const os = require('os');
