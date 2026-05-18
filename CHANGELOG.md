@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.12] - 2026-05-18
+
+### Fixed
+- **Startup health check fails on authenticated endpoints** — `checkOllama` now sends `Authorization: Bearer` header when probing `/models`. Previously, remote servers requiring auth (oMLX, OpenRouter, etc.) would fail the startup check even with a valid API key configured.
+- **Better error messages** — Startup no longer assumes "LM Studio" for all OpenAI-compatible endpoints. Shows specific hint on 401/403 to set `OPENAI_API_KEY`.
+
 ## [0.4.11] - 2026-05-18
 
 ### Fixed

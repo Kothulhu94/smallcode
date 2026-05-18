@@ -84,7 +84,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.4.11';
+const VERSION = '0.4.12';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -416,10 +416,19 @@ async function checkOllama(config) {
   // LM Studio / OpenAI-compatible endpoint
   if (config.model.provider === 'openai' || baseUrl.includes('/v1')) {
     try {
-      const response = await fetch(`${baseUrl}/models`);
+      // Include auth header if API key is available (needed for remote/authenticated endpoints)
+      const headers = {};
+      const apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
+      if (apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`;
+      }
+      const response = await fetch(`${baseUrl}/models`, { headers });
       if (!response.ok) {
-        console.log(`  ⚠ Cannot reach LM Studio at ${baseUrl}`);
-        console.log(`  Make sure LM Studio server is running.`);
+        console.log(`  ⚠ Cannot reach endpoint at ${baseUrl}`);
+        console.log(`  Check that your model server is running and accessible.`);
+        if (response.status === 401 || response.status === 403) {
+          console.log(`  Got ${response.status} — set OPENAI_API_KEY in .env if your server requires auth.`);
+        }
         return false;
       }
       const data = await response.json();
@@ -435,9 +444,9 @@ async function checkOllama(config) {
         }
       }
       return true;
-    } catch {
-      console.log(`  ⚠ Cannot reach LM Studio at ${baseUrl}`);
-      console.log(`  Start the server in LM Studio → Developer tab.`);
+    } catch (e) {
+      console.log(`  ⚠ Cannot reach endpoint at ${baseUrl}`);
+      console.log(`  Check that your model server is running and the URL is correct.`);
       return false;
     }
   }
