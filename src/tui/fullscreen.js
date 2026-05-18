@@ -211,11 +211,16 @@ class FullScreenTUI {
     this.width = process.stdout.columns || 80;
     this.height = process.stdout.rows || 24;
 
+    // Dynamic input height: grows with content (min 3, max 8 lines)
+    const inputAvail = this.width - 5;
+    const wrappedLines = inputAvail > 0 ? Math.ceil(Math.max(1, this.inputBuffer.length) / inputAvail) : 1;
+    this.inputHeight = Math.min(8, Math.max(3, wrappedLines + 2)); // +2 for border + hint
+
     this.chatHeight = this.height - this.inputHeight - this.statusHeight;
 
     if (this.showToolPanel && this.width > 100) {
       this.chatWidth = Math.floor(this.width * 0.65);
-      this.toolWidth = this.width - this.chatWidth - 1; // 1 for divider
+      this.toolWidth = this.width - this.chatWidth - 1;
     } else {
       this.chatWidth = this.width;
       this.toolWidth = 0;
@@ -226,6 +231,7 @@ class FullScreenTUI {
 
   render() {
     if (!this.active) return;
+    this._computeLayout(); // Recalculate in case input grew/shrunk
 
     let buf = '';
 
@@ -246,13 +252,12 @@ class FullScreenTUI {
     // Status bar
     buf += this._renderStatus();
 
-    // Position cursor in input
-    const inputRow = this.chatHeight + 2; // +1 for border, +1 for 1-index
+    // Position cursor in wrapped input
     const inputAvail = this.width - 5;
-    const scrollOffset = this.inputBuffer.length > inputAvail
-      ? Math.max(0, this.inputCursor - inputAvail + 5)
-      : 0;
-    const inputCol = 5 + (this.inputCursor - scrollOffset); // "│ > " prefix + visible cursor pos
+    const cursorLine = Math.floor(this.inputCursor / inputAvail); // which wrapped line
+    const cursorCol = this.inputCursor % inputAvail; // position within that line
+    const inputRow = this.chatHeight + 2 + cursorLine; // +1 border, +1 for 1-index
+    const inputCol = 5 + cursorCol; // "│ > " prefix
     buf += ANSI.moveTo(inputRow, inputCol) + ANSI.showCursor;
 
     this._rawWrite(buf);
@@ -400,28 +405,48 @@ class FullScreenTUI {
     buf += ANSI.moveTo(row, 1);
     buf += t.border + BOX.horizontal.repeat(this.width) + ANSI.reset;
 
-    // Input line — left border accent + clean input
-    const inputAvail = this.width - 5; // "│ > " prefix
-    buf += ANSI.moveTo(row + 1, 1);
-    buf += t.inputBg + t.border + BOX.vertical + ANSI.reset + t.inputBg;
-    buf += t.muted + ' > ' + ANSI.reset + t.inputBg + t.fg;
-
-    // Show the visible portion of input (scroll horizontally if too long)
-    let visibleInput = this.inputBuffer;
-    if (this.inputBuffer.length > inputAvail) {
-      const scrollOffset = Math.max(0, this.inputCursor - inputAvail + 5);
-      visibleInput = this.inputBuffer.slice(scrollOffset, scrollOffset + inputAvail);
+    // Input area — wraps vertically for long text
+    const inputAvail = this.width - 5; // "│ > " prefix / "│   " continuation
+    const inputLines = [];
+    
+    // Word-wrap the input buffer into lines
+    if (this.inputBuffer.length === 0) {
+      inputLines.push('');
+    } else {
+      for (let i = 0; i < this.inputBuffer.length; i += inputAvail) {
+        inputLines.push(this.inputBuffer.slice(i, i + inputAvail));
+      }
     }
-    buf += visibleInput;
-    buf += ' '.repeat(Math.max(0, inputAvail - visibleInput.length));
-    buf += ANSI.reset;
+
+    // Render each wrapped line
+    for (let i = 0; i < inputLines.length && i < 6; i++) {
+      buf += ANSI.moveTo(row + 1 + i, 1);
+      buf += t.inputBg + t.border + BOX.vertical + ANSI.reset + t.inputBg;
+      if (i === 0) {
+        buf += t.muted + ' > ' + ANSI.reset + t.inputBg + t.fg;
+      } else {
+        buf += '   ' + t.inputBg + t.fg;
+      }
+      buf += inputLines[i];
+      buf += ' '.repeat(Math.max(0, inputAvail - inputLines[i].length));
+      buf += ANSI.reset;
+    }
+
+    // Clear remaining input area lines
+    for (let i = inputLines.length; i < this.inputHeight - 2; i++) {
+      buf += ANSI.moveTo(row + 1 + i, 1);
+      buf += ' '.repeat(this.width);
+    }
 
     // Hint line
-    buf += ANSI.moveTo(row + 2, 1);
+    const hintRow = row + this.inputHeight - 1;
+    buf += ANSI.moveTo(hintRow, 1);
     if (this.commandPaletteOpen) {
       buf += t.muted + '  ↑↓ navigate  enter select  esc cancel' + ANSI.reset;
+    } else if (inputLines.length > 1) {
+      buf += t.muted + `  ${this.inputBuffer.length} chars` + ANSI.reset;
     } else {
-      buf += t.muted + '' + ANSI.reset; // Clean — no hint clutter
+      buf += t.muted + '' + ANSI.reset;
     }
 
     return buf;

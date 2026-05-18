@@ -1629,6 +1629,18 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       }
     }
 
+    // Greeting guard: detect when model outputs a greeting after tool failures (lost context)
+    if (toolCallsThisTurn > 0 && message.content) {
+      const lc = message.content.toLowerCase();
+      const isGreeting = lc.includes('how can i help') || lc.includes('what would you like') || lc.includes('what can i') || (lc.startsWith('hey') && lc.includes('assist'));
+      if (isGreeting && conversationHistory.some(m => m.role === 'user' && !m.content.startsWith('['))) {
+        // Model lost context and reset to greeting — push it back
+        conversationHistory.push({ role: 'assistant', content: message.content });
+        conversationHistory.push({ role: 'user', content: '[SYSTEM] You output a greeting instead of completing the task. Look at the conversation above — there is still work to do. If a tool failed, explain what went wrong. Do NOT restart the conversation.' });
+        continue;
+      }
+    }
+
     // Stream the final response for better UX
     if (message.content) {
       conversationHistory.push({ role: 'assistant', content: message.content });
@@ -1763,6 +1775,13 @@ function runValidation(filePath) {
       if (fs.existsSync(cp)) { compiler = cp; break; }
     }
     if (!compiler) return null; // No validator available
+    // Try bone_check — if it crashes (not installed properly), skip validation
+    try {
+      const { execSync } = require('child_process');
+      execSync(`node "${compiler}" --version`, { encoding: 'utf-8', timeout: 5000, cwd: process.cwd() });
+    } catch {
+      return null; // Compiler not working, skip .bone validation
+    }
     cmd = `node "${compiler}" check "${filePath}" 2>&1`;
     parseErrors = (output) => output.split('\n').filter(l => l.includes('error')).slice(0, 5);
   }
@@ -1856,7 +1875,10 @@ Rules:
 - Be concise — show what you did, not lengthy explanations.
 - If a task has multiple steps, use compound tools to minimize calls.
 - When you're done, say what you accomplished in 1-2 sentences.
+- If a tool fails, explain what went wrong and what you tried. Do NOT ignore errors and output a generic greeting.
+- NEVER output a greeting or "how can I help" message in the middle of a task. Stay focused on the current work.
 - Create files with write_file directly. Do NOT run mkdir first — write_file creates directories automatically.
+- Do NOT delete and recreate files to fix errors. Use the patch tool to fix the specific broken lines.
 ${currentTaskType === 'backend' ? `
 BONESCRIPT MODE — For Node.js/TypeScript backends, use BoneScript:
 1. Write a .bone file (declarative syntax — entities, capabilities, events, policies)
