@@ -419,6 +419,59 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         return;
       }
 
+      case '/session': {
+        const { MultiSessionManager } = require('../src/session/multi');
+        if (!global._smallcodeMulti) global._smallcodeMulti = new MultiSessionManager();
+        const msm = global._smallcodeMulti;
+        const sub = parts[1];
+
+        if (!sub || sub === 'list') {
+          const sessions = msm.list();
+          if (sessions.length === 0) {
+            console.log(chalk.gray('  No parallel sessions. Use /session new <task>'));
+          } else {
+            console.log(chalk.bold(`  Parallel sessions (${sessions.length}):`));
+            for (const s of sessions) {
+              const marker = s.active ? chalk.green(' ●') : '  ';
+              console.log(`  ${marker} ${chalk.cyan(s.id)} ${chalk.white(s.title)} ${chalk.gray(`${s.messages} msgs, ${s.age}s`)}`);
+            }
+          }
+        } else if (sub === 'new') {
+          const title = parts.slice(2).join(' ') || undefined;
+          const s = msm.create(title);
+          conversationHistory.length = 0; // Clear current for new session
+          console.log(`  ${chalk.green('✓')} New session ${chalk.cyan(s.id)}: ${s.title}`);
+        } else if (sub === 'switch') {
+          const id = parts[2];
+          if (!id) { console.log(chalk.gray('  Usage: /session switch <id>')); }
+          else {
+            const s = msm.switch(id);
+            if (s) {
+              conversationHistory.length = 0;
+              conversationHistory.push(...s.messages);
+              console.log(`  ${chalk.green('✓')} Switched to ${chalk.cyan(s.id)}: ${s.title}`);
+            } else {
+              console.log(chalk.red(`  Session ${id} not found.`));
+            }
+          }
+        } else if (sub === 'kill') {
+          const id = parts[2];
+          if (!id) { console.log(chalk.gray('  Usage: /session kill <id>')); }
+          else {
+            const ok = msm.kill(id);
+            console.log(ok ? chalk.green(`  ✓ Killed ${id}`) : chalk.red(`  Not found: ${id}`));
+          }
+        } else {
+          console.log(chalk.gray('  /session list          Show parallel sessions'));
+          console.log(chalk.gray('  /session new <task>    Start new session'));
+          console.log(chalk.gray('  /session switch <id>   Switch focus'));
+          console.log(chalk.gray('  /session kill <id>     Terminate session'));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
       case '/sessions': {
         const { SessionStore } = require('../src/session/persistence');
         const ss = new SessionStore(process.cwd());

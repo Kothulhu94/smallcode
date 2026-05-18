@@ -43,7 +43,7 @@ In practice, small local models rarely produce destructive commands unprompted â
 
 If you discover a security issue, please open a GitHub issue or contact the maintainer directly. We take reports seriously and will address them promptly.
 
-For issues that could affect other users (e.g., a dependency vulnerability), we prefer responsible disclosure â€” reach out before posting publicly so we can prepare a fix.
+For issues that could affect other users (e.g., a dependency vulnerability), we prefer responsible disclosure. Please reach out before posting publicly so we can prepare a fix.
 
 ## Scope
 

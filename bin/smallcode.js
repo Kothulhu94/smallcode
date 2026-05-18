@@ -43,6 +43,9 @@ const { SkillManager } = require('../src/plugins/skills');
 const { SessionStore } = require('../src/session/persistence');
 const { resolveReferences, formatReferencesForPrompt } = require('../src/session/references');
 const { TokenTracker } = require('../src/session/tokens');
+const { UndoStack } = require('../src/session/undo');
+const { shouldInjectGitContext, getGitDiffContext } = require('../src/session/git_context');
+const { routeModel } = require('../src/model/router');
 
 // Initialize structured memory (budget-aware-mcp's SQLite + FTS5 store)
 let memoryStore;
@@ -1277,9 +1280,15 @@ const MAX_IMPROVE_ITERATIONS = 2;
 async function runAgentLoop(userMessage, config) {
   // Resolve @file references in user input
   const { text, files } = resolveReferences(userMessage, process.cwd());
-  const augmented = files.length > 0
+  let augmented = files.length > 0
     ? text + formatReferencesForPrompt(files)
     : text;
+
+  // Auto-inject git diff when message implies recent changes
+  if (shouldInjectGitContext(userMessage)) {
+    const gitCtx = getGitDiffContext(process.cwd(), 80);
+    if (gitCtx) augmented += gitCtx;
+  }
 
   conversationHistory.push({ role: 'user', content: augmented });
 
@@ -1611,6 +1620,25 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
 }
 
 // ─── Validation for Improvement Loop ────────────────────────────────────────
+
+// LSP client instance (lazy-initialized on first validation)
+let _lspClient = null;
+let _lspAttempted = false;
+
+async function initLSP() {
+  if (_lspAttempted) return _lspClient;
+  _lspAttempted = true;
+  try {
+    const { LSPClient } = require('../src/lsp/client');
+    const client = new LSPClient(process.cwd());
+    const ok = await client.start();
+    if (ok) {
+      _lspClient = client;
+      if (_fullscreenRef) _fullscreenRef.addTool('lsp', 'ok', `${client.serverInfo.language} language server connected`);
+    }
+  } catch {}
+  return _lspClient;
+}
 
 function runValidation(filePath) {
   const { execSync } = require('child_process');
