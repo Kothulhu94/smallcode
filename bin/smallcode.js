@@ -139,6 +139,8 @@ async function mcpCall(method, params = {}) {
   if (!mcpProcess) return null;
 
   return new Promise((resolve) => {
+    if (!mcpProcess || !mcpProcess.stdout || !mcpProcess.stdin) { resolve(null); return; }
+
     const id = mcpRequestId++;
     const request = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
 
@@ -164,7 +166,7 @@ async function mcpCall(method, params = {}) {
 
     // Timeout after 5s
     setTimeout(() => {
-      mcpProcess.stdout.off('data', onData);
+      if (mcpProcess) mcpProcess.stdout.off('data', onData);
       resolve(null);
     }, 5000);
   });
