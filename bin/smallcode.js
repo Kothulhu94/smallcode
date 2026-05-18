@@ -338,6 +338,7 @@ function loadConfig() {
     },
     context: {
       max_budget_pct: parseInt(env.SMALLCODE_CONTEXT_BUDGET) || 70,
+      detected_window: parseInt(env.SMALLCODE_CONTEXT_WINDOW) || 0, // 0 = auto-detect from endpoint
       working_memory_tokens: 500,
       summary_threshold: 200,
     },
