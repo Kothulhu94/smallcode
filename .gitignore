@@ -54,3 +54,7 @@ desktop.ini
 # Environment
 .env
 .env.local
+
+# MarrowScript source (internal, not shipped)
+*.marrow
+marrow.toml
