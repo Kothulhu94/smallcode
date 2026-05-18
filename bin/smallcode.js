@@ -269,6 +269,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '--acp') flags.acp = true;
   else if (arg === '--non-interactive') flags.nonInteractive = true;
   else if (arg === '--classic') flags.classic = true;
+  else if (arg === '--verbose' || arg === '-v') flags.verbose = true;
   else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
   else if (arg === '-p' || arg === '--provider') { flags.provider = args[++i]; }
   else if (arg === '--eval') { flags.eval = args[++i] || 'classify_accuracy'; }
@@ -370,21 +371,28 @@ function loadConfig() {
     };
   }
 
-  // Legacy: still check smallcode.toml for backwards compatibility
-  const tomlPath = path.join(process.cwd(), 'smallcode.toml');
-  if (fs.existsSync(tomlPath) && !config.model.name) {
-    try {
-      const content = fs.readFileSync(tomlPath, 'utf-8');
-      const lines = content.split('\n');
-      for (const line of lines) {
-        const m = line.match(/^name\s*=\s*"?([^"#]+)"?/);
-        if (m) config.model.name = m[1].trim();
-        const b = line.match(/^baseUrl\s*=\s*"?([^"#]+)"?/);
-        if (b) config.model.baseUrl = b[1].trim();
-        const p = line.match(/^provider\s*=\s*"?([^"#]+)"?/);
-        if (p) config.model.provider = p[1].trim();
-      }
-    } catch {}
+  // Legacy: still check smallcode.toml / config.toml for backwards compatibility
+  const tomlPaths = [
+    path.join(process.cwd(), 'smallcode.toml'),
+    path.join(process.cwd(), '.smallcode', 'config.toml'),
+    path.join(os.homedir(), '.config', 'smallcode', 'config.toml'),
+  ];
+  for (const tomlPath of tomlPaths) {
+    if (fs.existsSync(tomlPath) && !config.model.name) {
+      try {
+        const content = fs.readFileSync(tomlPath, 'utf-8');
+        const lines = content.split('\n');
+        for (const line of lines) {
+          const m = line.match(/^name\s*=\s*"?([^"#]+)"?/);
+          if (m) config.model.name = m[1].trim();
+          const b = line.match(/^(?:baseUrl|base_url)\s*=\s*"?([^"#]+)"?/);
+          if (b) config.model.baseUrl = b[1].trim();
+          const p = line.match(/^provider\s*=\s*"?([^"#]+)"?/);
+          if (p) config.model.provider = p[1].trim();
+        }
+        break;
+      } catch {}
+    }
   }
 
   // CLI flags override everything
@@ -548,11 +556,11 @@ async function runTUI(config) {
       const text = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
       const clean = text.replace(/\x1b\[[0-9;]*m/g, '').trim();
       if (!clean) return;
-      // Skip turn summaries
-      if (clean.startsWith('───')) return;
+      // Skip turn summaries unless verbose
+      if (clean.startsWith('───') && !flags.verbose) return;
       // Pair with current tool name for rich display
       if (_currentToolName) {
-        const isError = clean.startsWith('✗') || clean.includes('Exit code');
+        const isError = clean.startsWith('✗') || clean.includes('Exit code') || clean.includes('Timed out');
         screen.addTool(_currentToolName, isError ? 'err' : 'ok', clean);
         _currentToolName = '';
       } else {
@@ -916,25 +924,42 @@ async function executeTool(name, args) {
     }
 
     case 'bash': {
-      // Auto-translate common Unix commands to Windows
+      // Auto-translate common Unix commands to Windows (skip on Linux)
       let command = args.command;
-      command = command.replace(/^ls\b/, 'dir');
-      command = command.replace(/^ls /, 'dir ');
-      command = command.replace(/^cat /, 'type ');
-      command = command.replace(/^rm -rf /, 'rmdir /s /q ');
-      command = command.replace(/^rm /, 'del ');
-      command = command.replace(/^touch /, 'echo.>');
-      command = command.replace(/^cp /, 'copy ');
-      command = command.replace(/^mv /, 'move ');
-      command = command.replace(/^mkdir -p /, 'mkdir ');
+      if (process.platform === 'win32') {
+        command = command.replace(/^ls\b/, 'dir');
+        command = command.replace(/^ls /, 'dir ');
+        command = command.replace(/^cat /, 'type ');
+        command = command.replace(/^rm -rf /, 'rmdir /s /q ');
+        command = command.replace(/^rm /, 'del ');
+        command = command.replace(/^touch /, 'echo.>');
+        command = command.replace(/^cp /, 'copy ');
+        command = command.replace(/^mv /, 'move ');
+        command = command.replace(/^mkdir -p /, 'mkdir ');
+      }
+
+      // Verbose: show what's being executed
+      if (flags.verbose && _fullscreenRef) {
+        _fullscreenRef.addTool('bash', 'ok', `$ ${command}`);
+      }
       
       try {
         const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
         const trimmed = output.length > 3000 ? output.slice(0, 2000) + '\n...(truncated)...\n' + output.slice(-500) : output;
+        // Verbose: show output
+        if (flags.verbose && _fullscreenRef && trimmed.trim()) {
+          const lines = trimmed.split('\n').slice(0, 10);
+          for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
+        }
         return { result: trimmed || '(no output)', command };
       } catch (e) {
         const output = (e.stdout || '') + (e.stderr || '');
         const exitReason = e.status === null ? 'Timed out (killed after 30s)' : `Exit code ${e.status}`;
+        // Verbose: show error output
+        if (flags.verbose && _fullscreenRef && output.trim()) {
+          const lines = output.split('\n').slice(0, 8);
+          for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
+        }
         return { result: output.slice(0, 2000) || e.message, error: exitReason, command };
       }
     }
@@ -1644,9 +1669,24 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       const lc = message.content.toLowerCase();
       const isGreeting = lc.includes('how can i help') || lc.includes('what would you like') || lc.includes('what can i') || (lc.startsWith('hey') && lc.includes('assist'));
       if (isGreeting && conversationHistory.some(m => m.role === 'user' && !m.content.startsWith('['))) {
-        // Model lost context and reset to greeting — push it back
         conversationHistory.push({ role: 'assistant', content: message.content });
         conversationHistory.push({ role: 'user', content: '[SYSTEM] You output a greeting instead of completing the task. Look at the conversation above — there is still work to do. If a tool failed, explain what went wrong. Do NOT restart the conversation.' });
+        continue;
+      }
+    }
+
+    // Post-decompose give-up detection: if model responds with vague text after failures, notify user
+    if (toolCallsThisTurn > 0 && message.content) {
+      const lc = message.content.toLowerCase();
+      const gaveUp = lc.includes('output is truncated') || lc.includes('let me try') || lc.includes('let me run') || (lc.length < 100 && !lc.includes('?') && toolCallsThisTurn > 3);
+      const hadDecompose = conversationHistory.some(m => m.content && m.content.includes('[DECOMPOSE]'));
+      if (gaveUp && hadDecompose && escalationEngine && escalationEngine.canEscalate()) {
+        // Model is stuck after decompose — offer escalation
+        if (_fullscreenRef) {
+          _fullscreenRef.addTool('escalation', 'err', 'Model stuck after decompose. Attempting escalation...');
+        }
+        conversationHistory.push({ role: 'assistant', content: message.content });
+        conversationHistory.push({ role: 'user', content: '[SYSTEM] You appear stuck. The decompose strategy did not work. Take a completely different approach or clearly explain what is blocking you and what you need from the user to proceed.' });
         continue;
       }
     }
