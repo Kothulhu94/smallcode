@@ -945,7 +945,8 @@ async function executeTool(name, args) {
       
       try {
         const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
-        const trimmed = output.length > 3000 ? output.slice(0, 2000) + '\n...(truncated)...\n' + output.slice(-500) : output;
+        const maxOutput = (config.context?.detected_window || 32000) < 64000 ? 1500 : 3000;
+        const trimmed = output.length > maxOutput ? output.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + output.slice(-300) : output;
         // Verbose: show output
         if (flags.verbose && _fullscreenRef && trimmed.trim()) {
           const lines = trimmed.split('\n').slice(0, 10);
@@ -1363,12 +1364,26 @@ async function runAgentLoop(userMessage, config) {
     }
   }
 
-  // Auto-compact if history is getting long (protect small model context)
-  if (conversationHistory.length > 30) {
-    const removed = conversationHistory.splice(0, conversationHistory.length - 12);
-    const summary = `[Context compacted: ${removed.length} earlier messages removed.]`;
+  // Auto-compact: estimate tokens and aggressively trim to stay within context window
+  const estimatedTokens = conversationHistory.reduce((sum, m) => {
+    const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+    return sum + Math.ceil(content.length / 4);
+  }, 0);
+  const maxContextTokens = (config.context?.detected_window || 32000) * ((config.context?.max_budget_pct || 70) / 100);
+
+  if (estimatedTokens > maxContextTokens || conversationHistory.length > 30) {
+    // Aggressively trim: remove oldest messages until under budget
+    while (conversationHistory.length > 6) {
+      const currentEst = conversationHistory.reduce((sum, m) => {
+        const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+        return sum + Math.ceil(c.length / 4);
+      }, 0);
+      if (currentEst < maxContextTokens * 0.7 && conversationHistory.length <= 20) break;
+      conversationHistory.shift();
+    }
+    const summary = `[Context compacted to fit ${Math.round(maxContextTokens)} token budget]`;
     conversationHistory.unshift({ role: 'system', content: summary });
-    console.log(tui.compacted(removed.length));
+    console.log(tui.compacted(conversationHistory.length));
   }
 
   let toolCallsThisTurn = 0;
