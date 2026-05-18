@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.11] - 2026-05-18
+
+### Fixed
+- **Critical: API key not sent in requests** — `chatCompletion` now includes `Authorization: Bearer <key>` header when `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY` is set. Previously only local (no-auth) endpoints worked for the main agent loop.
+- **OpenRouter support** — Added required `HTTP-Referer` and `X-Title` headers when `SMALLCODE_BASE_URL` points to `openrouter.ai`.
+- **`/escalation` command crash** — `escalationEngine` was not in scope inside the command handler. Now passed as parameter to `createCommandHandler`.
+- **`-v` flag collision** — `-v` was assigned to both `--version` and `--verbose`. Now `-v` is version, `-V` is verbose.
+- **VERSION constant mismatch** — Was hardcoded as `0.1.0`, now reads `0.4.10` matching package.json.
+- **Auto-compact destroying system messages** — Context compaction now preserves `role: 'system'` messages (skills, plugins) and only evicts user/assistant/tool messages.
+- **ACP adapter version string** — Was stuck at `0.2.7`, now matches package version.
+
+### Changed
+- Removed dead `handleCommand` function from `bin/smallcode.js` (~110 lines of unreachable code).
+- Pinned all dependency versions (removed caret ranges) per project conventions.
+- Updated `.env.example` with OpenRouter configuration example.
+
 ## [0.2.0] - 2026-05-17
 
 ### Added

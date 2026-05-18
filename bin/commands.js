@@ -6,7 +6,7 @@ const path = require('path');
 const tui = require('./tui');
 const chalk = tui.chalk;
 
-module.exports = function createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore) {
+module.exports = function createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine) {
 
   return async function handleCommand(cmd, rl) {
     const parts = cmd.split(' ');

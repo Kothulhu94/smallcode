@@ -32,7 +32,7 @@ class ACPAdapter {
       type: 'agent.capabilities',
       capabilities: this.capabilities,
       name: 'SmallCode',
-      version: '0.2.7',
+      version: '0.4.11',
     });
 
     rl.on('line', async (line) => {

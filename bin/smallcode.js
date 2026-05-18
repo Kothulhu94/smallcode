@@ -84,7 +84,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.1.0';
+const VERSION = '0.4.11';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -263,13 +263,14 @@ const positional = [];
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (arg === '-h' || arg === '--help') flags.help = true;
-  else if (arg === '-v' || arg === '--version') flags.version = true;
+  else if (arg === '--version') flags.version = true;
+  else if (arg === '-V' || arg === '--verbose') flags.verbose = true;
+  else if (arg === '-v') flags.version = true;
   else if (arg === '-r' || arg === '--resume') flags.resume = true;
   else if (arg === '--mcp') flags.mcp = true;
   else if (arg === '--acp') flags.acp = true;
   else if (arg === '--non-interactive') flags.nonInteractive = true;
   else if (arg === '--classic') flags.classic = true;
-  else if (arg === '--verbose' || arg === '-v') flags.verbose = true;
   else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
   else if (arg === '-p' || arg === '--provider') { flags.provider = args[++i]; }
   else if (arg === '--eval') { flags.eval = args[++i] || 'classify_accuracy'; }
@@ -292,6 +293,7 @@ USAGE:
 OPTIONS:
   -h, --help              Show this help
   -v, --version           Show version
+  -V, --verbose           Verbose output (show tool I/O)
   -m, --model <NAME>      Model to use (default: qwen2.5-coder:14b)
   -p, --provider <NAME>   Provider (ollama, openai, anthropic, llamacpp)
   -r, --resume            Resume last active session
@@ -468,7 +470,7 @@ const improvementAttempts = {}; // filePath → attempt count
 
 async function runTUI(config) {
   const createCommandHandler = require('./commands');
-  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore);
+  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine);
 
   const ok = await checkOllama(config);
   if (!ok && config.model.provider === 'ollama') {
@@ -617,134 +619,6 @@ async function runTUI(config) {
     console.log(chalk.gray('\n  Goodbye!\n'));
     process.exit(0);
   });
-}
-
-function handleCommand(cmd, config, rl) {
-  const parts = cmd.split(' ');
-  switch (parts[0]) {
-    case '/quit': case '/q': case '/exit':
-      rl.close();
-      break;
-    case '/clear':
-      console.log('  Session cleared.\n');
-      rl.prompt();
-      break;
-    case '/stats':
-      console.log(`  Model: ${config.model.provider}/${config.model.name}`);
-      console.log(`  Endpoint: ${config.model.baseUrl}`);
-      console.log(`  History: ${conversationHistory.length} messages`);
-      console.log(`  Files tracked: ${Object.keys(improvementAttempts).filter(k => k !== '__bash').length}`);
-      console.log(`  Working dir: ${process.cwd()}`);
-      console.log('');
-      rl.prompt();
-      break;
-    case '/diff': {
-      // Show git diff of current changes
-      const { execSync } = require('child_process');
-      try {
-        const diff = execSync('git diff --stat', { encoding: 'utf-8', cwd: process.cwd() });
-        if (diff.trim()) {
-          console.log('  Changes:');
-          console.log(diff.split('\n').map(l => `  ${l}`).join('\n'));
-        } else {
-          console.log('  No uncommitted changes.');
-        }
-      } catch {
-        console.log('  Not a git repo or git not available.');
-      }
-      console.log('');
-      rl.prompt();
-      break;
-    }
-    case '/git': {
-      // Quick git operations
-      const gitCmd = parts.slice(1).join(' ');
-      if (!gitCmd) {
-        console.log('  Usage: /git <command>');
-        console.log('  Examples: /git status, /git log, /git diff, /git commit -m "msg"');
-        console.log('');
-        rl.prompt();
-        break;
-      }
-      const { execSync: execGit } = require('child_process');
-      try {
-        const output = execGit(`git ${gitCmd}`, { encoding: 'utf-8', cwd: process.cwd(), timeout: 10000 });
-        console.log(output);
-      } catch (e) {
-        console.log(`  ${e.stdout || e.stderr || e.message}`);
-      }
-      rl.prompt();
-      break;
-    }
-    case '/help':
-      console.log('  Commands:');
-      console.log('  /quit      Exit');
-      console.log('  /clear     Reset conversation');
-      console.log('  /stats     Model, history, working dir');
-      console.log('  /diff      Show git diff of changes');
-      console.log('  /git <cmd> Run any git command');
-      console.log('  /loop <f>  Validate file, auto-fix errors');
-      console.log('  /compact   Trim conversation history');
-      console.log('  /undo      Revert last edit');
-      console.log('');
-      rl.prompt();
-      break;
-    case '/undo':
-      console.log('  ⚠ No edits to undo yet.');
-      console.log('');
-      rl.prompt();
-      break;
-    case '/loop': {
-      // Manual improvement loop: validate a file and ask model to fix
-      const targetFile = parts[1];
-      if (!targetFile) {
-        console.log('  Usage: /loop <filepath>');
-        console.log('  Validates the file and asks the model to fix any errors.');
-        console.log('');
-        rl.prompt();
-        break;
-      }
-      const loopValidation = runValidation(targetFile);
-      if (!loopValidation) {
-        console.log(`  No validator available for ${targetFile}`);
-      } else if (loopValidation.passed) {
-        console.log(`  \x1b[32m✓ ${targetFile} — no errors\x1b[0m`);
-      } else {
-        console.log(`  \x1b[33m⟳ ${loopValidation.errors.length} error(s) found. Sending to model...\x1b[0m`);
-        for (const err of loopValidation.errors.slice(0, 5)) {
-          console.log(`    \x1b[31m${err}\x1b[0m`);
-        }
-        console.log('');
-        (async () => {
-          await runAgentLoop(`Fix these errors in ${targetFile}:\n${loopValidation.errors.join('\n')}`, config);
-          console.log('');
-          rl.prompt();
-        })();
-        return;
-      }
-      console.log('');
-      rl.prompt();
-      break;
-    }
-    case '/compact': {
-      // Trim conversation history to save context
-      const kept = conversationHistory.length;
-      if (conversationHistory.length > 10) {
-        const trimmed = conversationHistory.splice(0, conversationHistory.length - 6);
-        console.log(`  Compacted: removed ${trimmed.length} old messages, kept last 6.`);
-      } else {
-        console.log(`  History is short (${kept} messages), nothing to compact.`);
-      }
-      console.log('');
-      rl.prompt();
-      break;
-    }
-    default:
-      console.log(`  Unknown command: ${parts[0]}. Type /help`);
-      console.log('');
-      rl.prompt();
-      break;
-  }
 }
 
 // ─── Model Communication ─────────────────────────────────────────────────────
@@ -1373,14 +1247,17 @@ async function runAgentLoop(userMessage, config) {
   const maxContextTokens = (config.context?.detected_window || 32000) * ((config.context?.max_budget_pct || 70) / 100);
 
   if (estimatedTokens > maxContextTokens || conversationHistory.length > 30) {
-    // Aggressively trim: remove oldest messages until under budget
+    // Trim oldest messages but preserve system/skill injections
     while (conversationHistory.length > 6) {
       const currentEst = conversationHistory.reduce((sum, m) => {
         const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
         return sum + Math.ceil(c.length / 4);
       }, 0);
       if (currentEst < maxContextTokens * 0.7 && conversationHistory.length <= 20) break;
-      conversationHistory.shift();
+      // Find first non-system message to remove (preserve skills/plugins)
+      const removeIdx = conversationHistory.findIndex(m => m.role !== 'system');
+      if (removeIdx === -1) break; // All system messages — can't trim further
+      conversationHistory.splice(removeIdx, 1);
     }
     const summary = `[Context compacted to fit ${Math.round(maxContextTokens)} token budget]`;
     conversationHistory.unshift({ role: 'system', content: summary });
@@ -2003,9 +1880,21 @@ ${getMemoryContext(messages)}${getSkillContext(messages)}${getPluginPrompts()}`
       max_tokens: 4096,
     };
 
+    // Build headers — include Authorization if an API key is available
+    const headers = { 'Content-Type': 'application/json' };
+    const apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    // OpenRouter requires HTTP-Referer and X-Title headers
+    if (baseUrl.includes('openrouter.ai')) {
+      headers['HTTP-Referer'] = 'https://github.com/Doorman11991/smallcode';
+      headers['X-Title'] = 'SmallCode';
+    }
+
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
     });
 
@@ -2017,7 +1906,7 @@ ${getMemoryContext(messages)}${getSkillContext(messages)}${getPluginPrompts()}`
         try {
           const retry = await fetch(`${baseUrl}/chat/completions`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify(body),
           });
           if (retry.ok) return await retry.json();
