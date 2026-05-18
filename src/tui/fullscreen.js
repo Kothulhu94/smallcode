@@ -141,7 +141,8 @@ class FullScreenTUI {
       { cmd: '/memory', alias: null, desc: 'View project memory' },
       { cmd: '/escalation', alias: null, desc: 'Model escalation status' },
       { cmd: '/skill', alias: null, desc: 'Manage reusable skills' },
-      { cmd: '/plugin', alias: null, desc: 'List installed plugins' },
+      { cmd: '/plugin', alias: null, desc: 'Manage plugins' },
+      { cmd: '/sessions', alias: null, desc: 'List/resume sessions' },
       { cmd: '/undo', alias: null, desc: 'Revert uncommitted changes' },
       { cmd: '/compact', alias: null, desc: 'Trim conversation history' },
       { cmd: '/help', alias: null, desc: 'Show all commands' },
@@ -688,14 +689,38 @@ class FullScreenTUI {
         ? this.theme.success + ' AI:  ' + ANSI.reset
         : this.theme.muted + '      ' + ANSI.reset;
     const contPrefix = '      '; // continuation indent
+    const t = this.theme;
 
     const rawLines = content.split('\n');
+    let inCodeBlock = false;
+
     for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i];
+
+      // Code block toggle
+      if (line.trim().startsWith('```')) {
+        inCodeBlock = !inCodeBlock;
+        const p = i === 0 ? prefix : contPrefix;
+        if (inCodeBlock) {
+          this.chatLines.push(p + t.border + '┌─ ' + t.muted + line.trim().slice(3) + ANSI.reset);
+        } else {
+          this.chatLines.push(contPrefix + t.border + '└─' + ANSI.reset);
+        }
+        continue;
+      }
+
       const p = i === 0 ? prefix : contPrefix;
-      const maxWidth = this.chatWidth - 7; // 6 chars prefix + 1 margin
-      const wrapped = this._wordWrap(rawLines[i], maxWidth);
-      for (let j = 0; j < wrapped.length; j++) {
-        this.chatLines.push((j === 0 ? p : contPrefix) + wrapped[j]);
+      const maxWidth = this.chatWidth - 7;
+
+      if (inCodeBlock) {
+        // Syntax highlight code lines
+        const highlighted = this._highlightCode(line);
+        this.chatLines.push(contPrefix + t.border + '│ ' + ANSI.reset + highlighted);
+      } else {
+        const wrapped = this._wordWrap(line, maxWidth);
+        for (let j = 0; j < wrapped.length; j++) {
+          this.chatLines.push((j === 0 ? p : contPrefix) + wrapped[j]);
+        }
       }
     }
     this.chatLines.push(''); // spacer
@@ -843,6 +868,24 @@ class FullScreenTUI {
     }
     if (current) lines.push(current);
     return lines.length > 0 ? lines : [''];
+  }
+
+  _highlightCode(line) {
+    const t = this.theme;
+    let hl = line;
+    // Strings
+    hl = hl.replace(/(["'`])(?:(?!\1).)*\1/g, m => ANSI.fgRgb(140, 200, 120) + m + ANSI.reset);
+    // Comments
+    hl = hl.replace(/(\/\/.*)$/, m => t.muted + m + ANSI.reset);
+    hl = hl.replace(/(#.*)$/, m => t.muted + m + ANSI.reset);
+    // Keywords
+    const kws = ['const','let','var','function','return','if','else','for','while','class','import','export','from','async','await','new','this','true','false','null','undefined','pub','fn','struct','impl','mut','match','def','self','None','type','interface','enum'];
+    for (const kw of kws) {
+      hl = hl.replace(new RegExp(`\\b${kw}\\b`, 'g'), ANSI.fgRgb(180, 140, 220) + kw + ANSI.reset);
+    }
+    // Numbers
+    hl = hl.replace(/\b(\d+)\b/g, ANSI.fgRgb(120, 200, 220) + '$1' + ANSI.reset);
+    return hl;
   }
 }
 

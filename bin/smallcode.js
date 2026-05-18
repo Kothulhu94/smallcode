@@ -397,6 +397,7 @@ async function runTUI(config) {
       },
       onCommand: async (cmd) => {
         if (cmd === '/quit' || cmd === '/q' || cmd === '/exit') {
+          if (sessionStore) sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
           screen.leave();
           if (mcpProcess) { mcpProcess.kill(); mcpProcess = null; }
           process.exit(0);
@@ -424,6 +425,10 @@ async function runTUI(config) {
         screen.render();
       },
       onExit: () => {
+        // Save session before exit
+        if (sessionStore) {
+          sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
+        }
         if (mcpProcess) { mcpProcess.kill(); mcpProcess = null; }
         process.exit(0);
       },

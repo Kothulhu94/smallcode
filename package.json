@@ -1,6 +1,6 @@
 {
   "name": "smallcode",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "AI coding agent optimized for small LLMs (≤20B parameters)",
   "bin": {
     "smallcode": "./bin/smallcode.js"
@@ -13,8 +13,8 @@
     "mcp": "node bin/smallcode.js --mcp"
   },
   "dependencies": {
-    "bonescript-compiler": "github:Doorman11991/BoneScript#main",
-    "budget-aware-mcp": "github:Doorman11991/budget-aware-mcp#master",
+    "bonescript-compiler": "^0.14.0",
+    "budget-aware-mcp": "^0.6.0",
     "chalk": "^4.1.2",
     "cli-highlight": "^2.1.11",
     "marked": "^15.0.12",

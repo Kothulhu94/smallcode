@@ -367,6 +367,44 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         return;
       }
 
+      case '/sessions': {
+        const { SessionStore } = require('../src/session/persistence');
+        const ss = new SessionStore(process.cwd());
+        const sub = parts[1];
+        const sessions = ss.list();
+
+        if (sub === 'resume' || sub === 'load') {
+          const id = parts[2];
+          if (!id) {
+            console.log(chalk.gray('  Usage: /sessions resume <id>'));
+          } else {
+            const loaded = ss.load(id);
+            if (loaded) {
+              conversationHistory.length = 0;
+              conversationHistory.push(...loaded.messages);
+              console.log(chalk.green(`  ✓ Resumed "${loaded.title || 'untitled'}" (${loaded.messages.length} msgs)`));
+            } else {
+              console.log(chalk.red(`  Session ${id} not found.`));
+            }
+          }
+        } else {
+          if (sessions.length === 0) {
+            console.log(chalk.gray('  No saved sessions.'));
+          } else {
+            console.log(chalk.bold(`  Sessions (${sessions.length}):`));
+            for (const s of sessions.slice(0, 15)) {
+              const age = Math.floor((Date.now() - new Date(s.updatedAt).getTime()) / 60000);
+              const ageStr = age < 60 ? `${age}m ago` : age < 1440 ? `${Math.floor(age/60)}h ago` : `${Math.floor(age/1440)}d ago`;
+              console.log(`    ${chalk.cyan(s.id.slice(0, 8))} ${chalk.white(s.title || 'untitled')} ${chalk.gray(`${s.msgs} msgs · ${ageStr}`)}`);
+            }
+            console.log(chalk.gray('\n  Resume: /sessions resume <id>'));
+          }
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
       case '/help':
         console.log('');
         console.log(chalk.bold('  Commands'));
@@ -384,6 +422,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/escalation')}    ${chalk.gray('View model escalation status')}`);
         console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
         console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);
+        console.log(`  ${chalk.cyan('/sessions')}      ${chalk.gray('List/resume saved sessions')}`);
         console.log(`  ${chalk.cyan('/clear')}         ${chalk.gray('Reset entire session')}`);
         console.log(`  ${chalk.cyan('/quit')}          ${chalk.gray('Exit SmallCode')}`);
         console.log('');
