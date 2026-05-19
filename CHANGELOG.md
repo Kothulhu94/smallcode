@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.4.14] - 2026-05-18
+## [0.4.15] - 2026-05-18
 
 ### Added
 - **Early-Stop Detection Engine** — Detects and recovers from degenerate model behavior:

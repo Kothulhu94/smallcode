@@ -1,5 +1,6 @@
 # Dev/test artifacts
 .stress-test/
+.test-runs/
 bench/
 venv/
 __pycache__/
@@ -7,6 +8,9 @@ __pycache__/
 .memory/
 .smallcode/
 node_modules/
+
+# Env files (contain credentials)
+.env
 
 # Build artifacts
 *.pyc
