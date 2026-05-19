@@ -125,9 +125,9 @@ async function executeTool(name, args, ctx) {
           const data = JSON.parse(listResult.content[0]?.text || '{}');
           const repos = data.repos || [];
           if (repos.length === 0) return { result: 'No projects indexed yet. The code graph is empty.' };
-          let output = `Workspace contains ${repos.length} indexed projects:\n\n`;
+          let output = `Workspace: ${repos.length} indexed projects\n\n`;
           for (const r of repos) {
-            output += `## ${r.name}\n  Path: ${r.root_path}\n  Files: ${r.file_count} | Symbols: ${r.symbol_count} | LOC: ${r.total_loc.toLocaleString()}\n  Languages: ${(r.languages || []).join(', ') || 'unknown'}\n  Edges: ${r.edge_count}\n  Last indexed: ${r.last_indexed_at}\n\n`;
+            output += `• ${r.name} — ${r.file_count || '?'} files, ${r.symbol_count || '?'} symbols, ${(r.languages || []).slice(0, 4).join(', ') || '?'}\n`;
           }
           return { result: output };
         } catch (e) { return { result: listResult.content[0]?.text || 'Failed to parse repo list.' }; }
