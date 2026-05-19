@@ -2,6 +2,25 @@
 
 ## [0.4.14] - 2026-05-18
 
+### Added
+- **Early-Stop Detection Engine** — Detects and recovers from degenerate model behavior:
+  - Repetition loop detection (same token sequence 3+ times → stops generation)
+  - Patch spiral recovery (4+ consecutive patch failures → forces write_file rewrite)
+  - Greeting regression detection (model outputs greeting mid-task → re-injects context)
+  - MarrowScript source: `src/governor/early_stop.ms`
+  - JS runtime: `src/governor/early_stop.js`
+
+- **2-Stage Tool Router** (module ready, not yet wired into main loop)
+  - Category selector reduces schema context by ~50% for small-context models
+  - Auto-detects routing mode based on model context window (≤16k = 2-stage, >16k = direct)
+  - JS runtime: `src/tools/two_stage_router.js`
+
+- **Model Profiles** (module ready, not yet wired into main loop)
+  - Per-model capability detection via fuzzy name matching
+  - Profiles for Gemma 4, Qwen 3/2.5, DeepSeek, CodeLlama, Mistral Nemo, StarCoder
+  - Drives routing mode, tool format, and context budget decisions
+  - JS runtime: `src/model/profiles.js`
+
 ### Fixed
 - **"Exit code undefined" display bug** — When `execSync` throws without a status code (e.g. EPERM, ENOENT), the error message now correctly shows "Timed out" instead of "Exit code undefined".
 

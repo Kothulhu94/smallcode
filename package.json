@@ -16,6 +16,7 @@
     "bonescript-compiler": "0.14.0",
     "chalk": "4.1.2",
     "cli-highlight": "2.1.11",
+    "express": "^5.2.1",
     "marked": "15.0.12",
     "marked-terminal": "7.3.0"
   },

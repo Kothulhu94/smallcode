@@ -53,6 +53,7 @@ try {
 }
 const { ToolScorer, checkAndEnforceHardFail, classifyTask } = require('./governor');
 const { EscalationEngine } = require('./escalation');
+const { EarlyStopDetector } = require('../src/governor/early_stop');
 const { PluginLoader } = require('../src/plugins/loader');
 const { SkillManager } = require('../src/plugins/skills');
 const { SessionStore } = require('../src/session/persistence');
@@ -77,6 +78,7 @@ try {
 
 // Initialize governor (tool scoring + verification)
 const toolScorer = new ToolScorer();
+const earlyStop = new EarlyStopDetector();
 let currentTaskType = 'coding';
 
 // Initialize escalation engine (lazy — resolves config at boot)
@@ -1202,6 +1204,9 @@ const MAX_TOOL_CALLS = 500;
 const MAX_IMPROVE_ITERATIONS = 2;
 
 async function runAgentLoop(userMessage, config) {
+  // Reset early-stop state for new turn
+  earlyStop.newTurn();
+
   // Clarification loop — detect vague prompts before wasting tool calls
   const { needsClarification, getClarificationInstruction } = require('../src/session/clarify');
   if (needsClarification(userMessage)) {
@@ -1547,6 +1552,19 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
           toolScorer.recordFailure(toolName, currentTaskType, result.error || 'unknown');
         }
 
+        // ── EARLY-STOP: Detect patch spiral (model stuck on corrupted file) ──
+        if (toolName === 'patch' || toolName === 'read_and_patch') {
+          const patchSuccess = !result.error;
+          const patchFile = toolArgs.path;
+          const stopSignal = earlyStop.recordPatchResult(patchFile, patchSuccess);
+          if (stopSignal) {
+            console.log(`  \x1b[33m⚡ ${stopSignal.message}\x1b[0m`);
+            conversationHistory.push({ role: 'user', content: stopSignal.injection });
+            // Don't continue with normal flow — force model to rewrite
+            break;
+          }
+        }
+
         // ── PLUGINS: Fire post_tool hooks ──
         if (pluginLoader && pluginLoader.hooks.length > 0) {
           for (const hook of pluginLoader.hooks) {
@@ -1577,11 +1595,10 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
 
     // Greeting guard: detect when model outputs a greeting after tool failures (lost context)
     if (toolCallsThisTurn > 0 && message.content) {
-      const lc = message.content.toLowerCase();
-      const isGreeting = lc.includes('how can i help') || lc.includes('what would you like') || lc.includes('what can i') || (lc.startsWith('hey') && lc.includes('assist'));
-      if (isGreeting && conversationHistory.some(m => m.role === 'user' && !m.content.startsWith('['))) {
+      const greetingSignal = earlyStop.checkGreeting(message.content, toolCallsThisTurn > 0);
+      if (greetingSignal && conversationHistory.some(m => m.role === 'user' && !m.content.startsWith('['))) {
         conversationHistory.push({ role: 'assistant', content: message.content });
-        conversationHistory.push({ role: 'user', content: '[SYSTEM] You output a greeting instead of completing the task. Look at the conversation above — there is still work to do. If a tool failed, explain what went wrong. Do NOT restart the conversation.' });
+        conversationHistory.push({ role: 'user', content: greetingSignal.injection });
         continue;
       }
     }
