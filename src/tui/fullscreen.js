@@ -182,8 +182,8 @@ class FullScreenTUI {
     // Store a direct reference to the real stdout.write (before any overrides)
     this._rawWrite = process.stdout.write.bind(process.stdout);
 
-    // Enter alternate buffer + raw mode + bracketed paste (NO mouse tracking — allows native text selection/copy)
-    this._rawWrite(ANSI.enterAlt + ANSI.hideCursor + '\x1b[?2004h');
+    // Enter alternate buffer + raw mode + mouse tracking (hold Shift to select text) + SGR encoding + bracketed paste
+    this._rawWrite(ANSI.enterAlt + ANSI.hideCursor + '\x1b[?1000h' + '\x1b[?1006h' + '\x1b[?2004h');
     process.stdin.setRawMode(true);
     process.stdin.resume();
 
@@ -200,7 +200,7 @@ class FullScreenTUI {
   leave() {
     this.active = false;
     const write = this._rawWrite || process.stdout.write.bind(process.stdout);
-    write(ANSI.showCursor + '\x1b[?2004l' + ANSI.leaveAlt + ANSI.reset);
+    write(ANSI.showCursor + '\x1b[?1000l' + '\x1b[?1006l' + '\x1b[?2004l' + ANSI.leaveAlt + ANSI.reset);
     process.stdin.setRawMode(false);
     process.stdin.pause();
   }
@@ -511,7 +511,7 @@ class FullScreenTUI {
     buf += ANSI.moveTo(row, 1);
     buf += t.statusBg;
 
-    const left = ` enter send`;
+    const left = ` enter send  shift+drag copy`;
     const scrollInfo = this.chatScroll < 0 ? `  ↑ scrolled` : '';
     const tokenStr = this.tokenInfo ? `  ${this.tokenInfo}` : '';
     const right = ` smallcode  ${this.model}  ${this.isStreaming ? '⟳' : '●'} `;
