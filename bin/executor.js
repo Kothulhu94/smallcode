@@ -76,6 +76,21 @@ async function executeTool(name, args, ctx) {
 
     case 'bash': {
       let command = args.command;
+
+      // Detect commands that start long-running servers (will block and timeout)
+      const blockingPatterns = /^(node|python|python3|ruby|php|go run|deno run|bun run)\s+.*\b(server|app|index|main)\b/i;
+      const explicitServers = /\b(express|fastify|flask|django|uvicorn|gunicorn|rails\s+s|npm\s+start|yarn\s+start|npm\s+run\s+dev)\b/i;
+      if (blockingPatterns.test(command) || explicitServers.test(command)) {
+        // Check if it's actually a --check or test command (those are fine)
+        if (!command.includes('--check') && !command.includes('--version') && !command.includes('test')) {
+          return {
+            result: `Refused: "${command}" would start a long-running server that blocks. Use "node --check <file>" to verify syntax, or describe what you want to test and I'll use a non-blocking approach.`,
+            error: 'Blocking command detected',
+            command,
+          };
+        }
+      }
+
       if (process.platform === 'win32') {
         command = command.replace(/^ls\b/, 'dir').replace(/^ls /, 'dir ').replace(/^cat /, 'type ').replace(/^rm -rf /, 'rmdir /s /q ').replace(/^rm /, 'del ').replace(/^touch /, 'echo.>').replace(/^cp /, 'copy ').replace(/^mv /, 'move ').replace(/^mkdir -p /, 'mkdir ');
       }
