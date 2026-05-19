@@ -14,7 +14,7 @@ SmallCode is a terminal-native coding agent designed from the ground up to extra
 
 | | OpenCode | SmallCode |
 |---|----------|-----------|
-| **Target** | Frontier models (Claude, GPT-4) | 7B-20B local models |
+| **Target** | Frontier models (Claude, GPT-5) | 7B-20B local models |
 | **Context** | Dumps everything | Budget-managed, summarized |
 | **Tool calling** | Assumes reliable JSON | Forgiving multi-format parser |
 | **Planning** | Single-shot | TODO-file decomposed steps |
