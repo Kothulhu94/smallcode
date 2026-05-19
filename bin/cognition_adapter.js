@@ -120,10 +120,27 @@ function isCompiledCognitionAvailable() {
   return _getCognition() !== null;
 }
 
+/**
+ * Get the compiled OpenAI-compatible provider for making LLM calls.
+ * Returns the provider instance or null if not available.
+ * Gives all calls: SSRF guard, auth headers, logprob confidence, structured errors.
+ */
+function getCompiledProvider() {
+  const cognition = _getCognition();
+  if (!cognition || !cognition.getModel) return null;
+  try {
+    const model = cognition.getModel('SmallCoder');
+    return model ? model.provider : null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   classifyTaskCompiled,
   compressHistoryCompiled,
   routeToTier,
   estimateComplexity,
+  getCompiledProvider,
   isCompiledCognitionAvailable,
 };

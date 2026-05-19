@@ -49,26 +49,41 @@ class EarlyStopDetector {
 
   /**
    * Track patch tool results. Returns a StopSignal if the model is stuck
-   * in a patch spiral (repeatedly failing to match old_str on the same file).
+   * in a patch spiral (repeatedly failing OR making no-op patches on the same file).
+   * Tracks both failures and total attempts per file per turn.
    */
-  recordPatchResult(filePath, success) {
-    if (success) {
-      delete this.patchFailures[filePath];
+  recordPatchResult(filePath, success, oldStr, newStr) {
+    // Track total attempts (success or fail) per file
+    if (!this._patchAttempts) this._patchAttempts = {};
+    this._patchAttempts[filePath] = (this._patchAttempts[filePath] || 0) + 1;
+
+    // Detect no-op patch (old_str === new_str, or patch "succeeded" but content unchanged)
+    const isNoOp = success && oldStr && newStr && oldStr === newStr;
+
+    if (success && !isNoOp) {
+      // Real successful patch — reduce failure count but don't fully reset
+      if (this.patchFailures[filePath]) {
+        this.patchFailures[filePath] = Math.max(0, this.patchFailures[filePath] - 1);
+      }
       return null;
     }
 
+    // Count failures (including no-ops which indicate confusion)
     this.patchFailures[filePath] = (this.patchFailures[filePath] || 0) + 1;
-    const count = this.patchFailures[filePath];
+    const failCount = this.patchFailures[filePath];
+    const totalAttempts = this._patchAttempts[filePath];
 
-    if (count >= this.maxPatchFailures) {
+    // Trigger on: 4+ failures OR 6+ total attempts on same file (model is spinning)
+    if (failCount >= this.maxPatchFailures || totalAttempts >= 6) {
       delete this.patchFailures[filePath];
+      delete this._patchAttempts[filePath];
       return {
         reason: 'patch_spiral',
-        message: `Patch failed ${count}x on ${filePath}. File likely corrupted. Switching to rewrite.`,
+        message: `Patch stuck on ${filePath} (${failCount} failures, ${totalAttempts} attempts). Switching to rewrite.`,
         action: 'rewrite_file',
-        injection: `[SYSTEM] You have failed to patch ${filePath} ${count} times in a row. The file is corrupted from previous bad patches. STOP using patch. Instead:
-1. Use read_file to see the current (broken) state
-2. Decide what the file SHOULD contain
+        injection: `[SYSTEM] You have attempted to patch ${filePath} ${totalAttempts} times (${failCount} failures). The file is likely corrupted or your patches don't match. STOP using patch. Instead:
+1. Use read_file to see the current state
+2. Decide what the ENTIRE file should contain
 3. Use write_file to rewrite it completely from scratch
 Do NOT attempt another patch on this file.`,
       };

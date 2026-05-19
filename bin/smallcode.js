@@ -127,6 +127,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '-r' || arg === '--resume') flags.resume = true;
   else if (arg === '--mcp') flags.mcp = true;
   else if (arg === '--acp') flags.acp = true;
+  else if (arg === '--init' || arg === 'init') flags.init = true;
   else if (arg === '--non-interactive') flags.nonInteractive = true;
   else if (arg === '--classic') flags.classic = true;
   else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
@@ -839,7 +840,7 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
         if (toolName === 'patch' || toolName === 'read_and_patch') {
           const patchSuccess = !result.error;
           const patchFile = toolArgs.path;
-          const stopSignal = earlyStop.recordPatchResult(patchFile, patchSuccess);
+          const stopSignal = earlyStop.recordPatchResult(patchFile, patchSuccess, toolArgs.old_str, toolArgs.new_str);
           if (stopSignal) {
             console.log(`  \x1b[33m⚡ ${stopSignal.message}\x1b[0m`);
             conversationHistory.push({ role: 'user', content: stopSignal.injection });
@@ -1600,6 +1601,11 @@ async function main() {
 
   if (flags.mcp) {
     runMCP();
+    return;
+  }
+
+  if (flags.init) {
+    require('./init');
     return;
   }
 
