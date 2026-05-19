@@ -39,13 +39,17 @@ SmallCode includes [BoneScript](https://github.com/Doorman11991/BoneScript) and 
 
 ### Requirements
 
-- Node.js 18+
+- Node.js 18+ (LTS recommended — 20.x or 22.x have prebuilt binaries for SQLite)
 - A local LLM server (LM Studio, Ollama, or any OpenAI-compatible endpoint)
 
-**Optional** (for code graph + memory features):
-- Python 3 + C/C++ build tools (`build-essential` on Ubuntu, `base-devel` on Arch)
-- These are needed by `better-sqlite3` (used by budget-aware-mcp for code intelligence)
-- SmallCode works fine without them — it falls back to JSON-based memory
+**Optional** (for code graph + FTS5 memory search):
+- `better-sqlite3` needs native compilation if prebuilt binaries aren't available for your Node version
+- Prebuilt binaries exist for Node LTS (20.x, 22.x) on Linux/macOS/Windows — no build tools needed
+- If you're on a non-LTS Node (23+, 25+), you'll need:
+  - **Linux**: `python3`, `make`, `gcc`/`g++` (`sudo apt install build-essential python3` or `pacman -S base-devel python`)
+  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+  - **Windows**: Visual Studio Build Tools with "Desktop development with C++" workload, or `npm install -g windows-build-tools`
+- **If build fails, SmallCode still works** — it falls back to JSON-based memory automatically
 
 ### Configuration
 
