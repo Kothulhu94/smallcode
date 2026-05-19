@@ -64,8 +64,17 @@ jobs:
           cp -r node_modules  _staging/smallcode/
           cp package.json     _staging/smallcode/
           cp package-lock.json _staging/smallcode/
+          cp smallcode.toml   _staging/smallcode/
+          cp mcp.json         _staging/smallcode/
+          cp .env.example     _staging/smallcode/
           cp README.md        _staging/smallcode/ 2>/dev/null || true
           cp LICENSE          _staging/smallcode/ 2>/dev/null || true
+
+          # Additional support files matching npm pack contents
+          cp install.sh       _staging/smallcode/ 2>/dev/null || true
+          cp install.ps1      _staging/smallcode/ 2>/dev/null || true
+          cp -r extensions    _staging/smallcode/ 2>/dev/null || true
+          cp -r marrow        _staging/smallcode/ 2>/dev/null || true
 
           # Remove TypeScript sources from compiled/ – ship .js only
           find _staging/smallcode/src/compiled -name '*.ts' -delete
