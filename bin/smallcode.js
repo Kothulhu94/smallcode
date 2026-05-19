@@ -454,7 +454,7 @@ async function runAgentLoop(userMessage, config) {
     const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
     return sum + Math.ceil(content.length / 4);
   }, 0);
-  const maxContextTokens = (config.context?.detected_window || 32000) * ((config.context?.max_budget_pct || 70) / 100);
+  const maxContextTokens = (config.context?.detected_window || 128000) * ((config.context?.max_budget_pct || 70) / 100);
 
   if (estimatedTokens > maxContextTokens || conversationHistory.length > 30) {
     // Trim oldest messages but preserve system/skill injections
@@ -527,7 +527,7 @@ async function runAgentLoop(userMessage, config) {
 
         // Add tool result to history (cap at 8k chars to prevent context explosion)
         const toolContent = result.result || result.error || '';
-        const maxToolResultChars = (config.context?.detected_window || 32000) < 64000 ? 6000 : 12000;
+        const maxToolResultChars = (config.context?.detected_window || 128000) < 64000 ? 6000 : 12000;
         const cappedContent = toolContent.length > maxToolResultChars
           ? toolContent.slice(0, maxToolResultChars - 200) + '\n\n...(truncated, ' + toolContent.length + ' chars total)...\n' + toolContent.slice(-200)
           : toolContent;
@@ -815,7 +815,11 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
     if (message.content) {
       conversationHistory.push({ role: 'assistant', content: message.content });
       // Render with markdown highlighting
-      process.stdout.write(tui.renderMarkdown(message.content));
+      if (_fullscreenRef) {
+        _fullscreenRef.addChat('assistant', message.content);
+      } else {
+        process.stdout.write(tui.renderMarkdown(message.content));
+      }
     } else if (!message.tool_calls || message.tool_calls.length === 0) {
       // No content AND no tool calls — try streaming for the response
       const streamedContent = await streamFinalResponse(config, conversationHistory);

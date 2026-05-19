@@ -84,7 +84,7 @@ async function executeTool(name, args, ctx) {
       }
       try {
         const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
-        const maxOutput = (config && config.context?.detected_window || 32000) < 64000 ? 1500 : 3000;
+        const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
         const trimmed = output.length > maxOutput ? output.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + output.slice(-300) : output;
         if (flags && flags.verbose && _fullscreenRef && trimmed.trim()) {
           const lines = trimmed.split('\n').slice(0, 10);
