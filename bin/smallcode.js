@@ -103,7 +103,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.6.4';
+const VERSION = '0.6.5';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -1176,11 +1176,17 @@ async function chatCompletion(config, messages) {
       headers['X-Title'] = 'SmallCode';
     }
 
+    // Timeout: abort if model doesn't respond in 120s (prevents permanent hang)
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
+
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
 
     if (!response.ok) {
       const err = await response.text();
