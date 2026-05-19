@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.8] - 2026-05-19
+
+### Added
+- **Deterministic Tool Router** — Compiled from `marrow/tool_router.marrow` to `src/compiled/tool_router.js`. Classifies user messages into tool categories (read/write/search/run/plan/web/respond) using pure weighted regex — zero LLM calls, zero tokens, zero latency.
+- **Per-turn tool filtering** — On each new turn, the router pre-classifies the intent and injects only the relevant tool subset. Saves 71–100% of tool schema tokens per call:
+  - `read` → 301 tok (was 1764, -83%)
+  - `write` → 334 tok (-81%)
+  - `search` → 278 tok (-84%)
+  - `run` → 260 tok (-85%)
+  - `plan` → 516 tok (-71%)
+  - `web` → 97 tok (-95%)
+  - `respond` → 0 tok (-100%, no tools injected for pure answer questions)
+- **Router confidence display** — Fullscreen TUI shows category + confidence% in the tool panel on each turn.
+- **20/20 classification accuracy** on test suite covering shell commands, code edits, search, planning, web lookups, greetings, and debugging questions.
+
+### Changed
+- **`getAllTools()`** — Now accepts `currentToolCategory` from the compiled router. Falls back to two_stage_router or all-tools if router unavailable.
+- **Tool category resets mid-turn** — After first tool call, tool list widens to full set (model may need different categories mid-turn).
+- **`marrow/tool_router.marrow`** — Source declaration for the compiled classifier (gitignored but included in npm package).
+
 ## [0.6.7] - 2026-05-19
 
 ### Added

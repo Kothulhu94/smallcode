@@ -91,6 +91,7 @@ const toolScorer = new ToolScorer();
 const earlyStop = new EarlyStopDetector();
 const tokenMonitor = new TokenMonitor();
 const traceRecorder = new TraceRecorder(process.cwd());
+let currentToolCategory = null; // Set per-turn by compiled tool router
 let currentTaskType = 'coding';
 let config = null; // Set in main(), used by executeTool and chatCompletion
 
@@ -108,7 +109,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.6.7';
+const VERSION = '0.6.8';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -457,6 +458,19 @@ async function runAgentLoop(userMessage, config) {
     currentTaskType = classifyTask(userMessage);
   }
 
+  // Deterministic tool routing: classify intent → filter tool schemas
+  // Zero tokens, zero latency — compiled from marrow/tool_router.marrow
+  try {
+    const { classifyToolCategory, categoryNeedsTools } = require('../src/compiled/tool_router');
+    const routeResult = classifyToolCategory(userMessage);
+    currentToolCategory = routeResult.category;
+    if (_fullscreenRef && routeResult.confidence > 0.3) {
+      _fullscreenRef.addTool('router', 'ok', `${routeResult.category} (${Math.round(routeResult.confidence * 100)}%)`);
+    }
+  } catch {
+    currentToolCategory = null; // Fall back to all tools
+  }
+
   // Multi-model routing: pick model based on task complexity (if configured)
   // Phase C: Marrowscript-compiled coding_router for tier-based dispatch.
   // Falls back to hand-rolled routeModel() if compiled router unavailable.
@@ -591,6 +605,10 @@ async function runAgentLoop(userMessage, config) {
 
     // If model wants to call tools
     if (message.tool_calls && message.tool_calls.length > 0) {
+      // After first tool call, widen to all tools for subsequent iterations
+      // (model may need different categories mid-turn)
+      currentToolCategory = null;
+
       // Add assistant message with tool calls to history
       conversationHistory.push(message);
 
@@ -1181,7 +1199,7 @@ async function chatCompletion(config, messages) {
     const body = {
       model: config.model.name,
       messages: [systemMsg, ...processedMessages],
-      tools: getAllTools(config),
+      tools: getAllTools(config, currentToolCategory),
       temperature: 0.1,
       max_tokens: 4096,
     };

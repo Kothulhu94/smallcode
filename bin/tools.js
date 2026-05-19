@@ -45,6 +45,25 @@ function getAllTools(config, stage2Category, deps = {}) {
   const mcpTools = deps.mcpClient ? deps.mcpClient.getToolDefs() : [];
   const allTools = [...TOOLS, ...COMPOUND_TOOLS, ...pluginTools, ...mcpTools];
 
+  // If a deterministic tool category was pre-classified, filter tools
+  // This skips the LLM-based two_stage routing entirely
+  if (stage2Category) {
+    try {
+      const { getToolsForCategory: getCompiledTools, categoryNeedsTools } = require('../src/compiled/tool_router');
+      if (!categoryNeedsTools(stage2Category)) {
+        // 'respond' category — no tools needed, saves ~800 tokens
+        return [];
+      }
+      const allowedNames = getCompiledTools(stage2Category);
+      if (allowedNames && allowedNames.length > 0) {
+        const filtered = allTools.filter(t => allowedNames.includes(t.function.name));
+        // Always include at least read_file as fallback
+        if (filtered.length > 0) return filtered;
+      }
+    } catch {}
+    // Fall through to two_stage_router logic if compiled router fails
+  }
+
   const contextWindow = config?.context?.detected_window || 32768;
   const routingOverride = process.env.SMALLCODE_TOOL_ROUTING;
   const mode = getRoutingMode(contextWindow, routingOverride);
