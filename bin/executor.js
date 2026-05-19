@@ -91,6 +91,22 @@ async function executeTool(name, args, ctx) {
         }
       }
 
+      // Detect scripts with interactive input (will EOF or block forever)
+      const scriptMatch = command.match(/^(?:python3?|node|ruby)\s+["']?([^\s"']+)/);
+      if (scriptMatch && !command.includes('--check') && !command.includes('-c') && !command.includes('-m')) {
+        const targetFile = path.resolve(cwd, scriptMatch[1]);
+        if (fs.existsSync(targetFile)) {
+          const fc = fs.readFileSync(targetFile, 'utf-8');
+          if (fc.includes('input(') || fc.includes('readline.question') || fc.includes('process.stdin.on')) {
+            return {
+              result: `Refused: "${command}" — file contains interactive input() calls that block in non-interactive mode. File created successfully. Verify syntax: python -m py_compile ${scriptMatch[1]}`,
+              error: 'Interactive script detected',
+              command,
+            };
+          }
+        }
+      }
+
       if (process.platform === 'win32') {
         command = command.replace(/^ls\b/, 'dir').replace(/^ls /, 'dir ').replace(/^cat /, 'type ').replace(/^rm -rf /, 'rmdir /s /q ').replace(/^rm /, 'del ').replace(/^touch /, 'echo.>').replace(/^cp /, 'copy ').replace(/^mv /, 'move ').replace(/^mkdir -p /, 'mkdir ');
       }
@@ -206,6 +222,28 @@ async function executeTool(name, args, ctx) {
       let output = `Created ${args.path} (${lines} lines)`;
       let cmdError = false;
       if (args.command) {
+        // Check if the file contains interactive input calls that would block
+        const hasInteractive = args.content && (
+          args.content.includes('input(') ||     // Python input()
+          args.content.includes('readline') ||    // Node readline
+          args.content.includes('process.stdin') || // Node stdin
+          args.content.includes('Scanner(') ||    // Java Scanner
+          args.content.includes('gets') ||        // Ruby gets
+          args.content.includes('read()')         // generic read
+        );
+        if (hasInteractive) {
+          output += `\n⚠ File contains interactive input calls (input/readline/stdin). Skipping execution — the script would hang waiting for user input. Use node --check or python -c "import py_compile; py_compile.compile('${args.path}')" to verify syntax instead.`;
+          return { result: output, action: 'Created', path: args.path, lines };
+        }
+        // Also check for server-start patterns
+        const blockingPatterns = /^(node|python|python3|ruby|php)\s+.*\b(server|app)\b/i;
+        const explicitServers = /\b(express|fastify|flask|django|uvicorn|npm\s+start)\b/i;
+        if (blockingPatterns.test(args.command) || explicitServers.test(args.command)) {
+          if (!args.command.includes('--check') && !args.command.includes('test')) {
+            output += `\n⚠ Command would start a long-running server. Skipping execution.`;
+            return { result: output, action: 'Created', path: args.path, lines };
+          }
+        }
         try {
           const cmdOut = execSync(args.command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024*1024 });
           output += `\n$ ${args.command}\n${cmdOut.slice(0, 2000)}`;
@@ -243,6 +281,21 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'run': {
+      // Check if the target file has interactive input that would block
+      const runMatch = args.command.match(/^(?:python3?|node|ruby)\s+["']?([^\s"']+)/);
+      if (runMatch) {
+        const targetFile = path.resolve(cwd, runMatch[1]);
+        if (fs.existsSync(targetFile)) {
+          const fileContent = fs.readFileSync(targetFile, 'utf-8');
+          if (fileContent.includes('input(') || fileContent.includes('readline') || fileContent.includes('process.stdin')) {
+            return {
+              result: `Refused: "${args.command}" — the file contains interactive input calls (input/readline/stdin) which cannot work in non-interactive mode. The file was created successfully. To verify syntax, use: python -m py_compile <file> or node --check <file>`,
+              error: 'Interactive script detected',
+              command: args.command,
+            };
+          }
+        }
+      }
       const timeout = (args.timeout || 30) * 1000;
       try {
         const output = execSync(args.command, { encoding: 'utf-8', timeout, cwd, maxBuffer: 1024*1024 });
