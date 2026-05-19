@@ -213,6 +213,8 @@ Error that won't go away: ${errors[0] || 'unknown'}`,
 
 // ─── Task Classifier ─────────────────────────────────────────────────────────
 
+// Synchronous regex-based classifier (fast, deterministic, no LLM)
+// Used as default for fast tasks and as fallback for the LLM-based one.
 function classifyTask(userMessage) {
   const msg = userMessage.toLowerCase();
   // Detect backend/API tasks that should use BoneScript — ONLY for Node.js/TypeScript backends
@@ -235,4 +237,17 @@ function classifyTask(userMessage) {
   return 'coding'; // default
 }
 
-module.exports = { ToolScorer, verifyCode, checkAndEnforceHardFail, classifyTask, verificationHistory, pickDecomposeStrategy };
+// Async classifier — uses MarrowScript-compiled cognition layer with caching,
+// validation, retries, and tracing. Falls back to regex classifier on failure.
+// Use this when latency budget allows (~200-500ms for a TinyClassifier call,
+// 0ms on cache hit).
+async function classifyTaskAsync(userMessage) {
+  try {
+    const { classifyTaskCompiled } = require('./cognition_adapter');
+    return await classifyTaskCompiled(userMessage, { fallback: classifyTask });
+  } catch {
+    return classifyTask(userMessage);
+  }
+}
+
+module.exports = { ToolScorer, verifyCode, checkAndEnforceHardFail, classifyTask, classifyTaskAsync, verificationHistory, pickDecomposeStrategy };

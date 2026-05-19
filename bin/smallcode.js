@@ -56,7 +56,7 @@ try {
 } catch {
   McpMemoryStore = null;
 }
-const { ToolScorer, checkAndEnforceHardFail, classifyTask } = require('./governor');
+const { ToolScorer, checkAndEnforceHardFail, classifyTask, classifyTaskAsync } = require('./governor');
 const { EscalationEngine } = require('./escalation');
 const { EarlyStopDetector } = require('../src/governor/early_stop');
 const { getProfile } = require('../src/model/profiles');
@@ -438,7 +438,12 @@ async function runAgentLoop(userMessage, config) {
   conversationHistory.push({ role: 'user', content: augmented });
 
   // Governor: classify task type (determines verification strategy)
-  currentTaskType = classifyTask(userMessage);
+  // Uses MarrowScript-compiled classifier with regex fallback
+  try {
+    currentTaskType = await classifyTaskAsync(userMessage);
+  } catch {
+    currentTaskType = classifyTask(userMessage);
+  }
 
   // Multi-model routing: pick model based on task complexity (if configured)
   if (config.models) {
