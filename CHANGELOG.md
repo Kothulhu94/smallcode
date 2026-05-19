@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.18] - 2026-05-18
+
+### Added
+- **Programmatic API** — `const { SmallCode } = require('smallcode')` now works. Run prompts, subscribe to events (tool_start, tool_end, error, early_stop), get structured results with file changes, tool call records, and token usage.
+  - MarrowScript source: `src/api/index.ms`
+  - JS runtime: `src/api/index.js`
+- **`main` field in package.json** — `require('smallcode')` now exports the API instead of nothing.
+- **`/profile` command** added to Commands table in README.
+
 ## [0.4.17] - 2026-05-18
 
 ### Added

@@ -44,7 +44,7 @@ SmallCode includes [BoneScript](https://github.com/Doorman11991/BoneScript) and 
 
 **Optional** (for code graph + FTS5 memory search):
 - `better-sqlite3` needs native compilation if prebuilt binaries aren't available for your Node version
-- Prebuilt binaries exist for Node LTS (20.x, 22.x) on Linux/macOS/Windows — no build tools needed
+- Prebuilt binaries exist for Node LTS (20.x, 22.x) on Linux/macOS/Windows. no build tools needed
 - If you're on a non-LTS Node (23+, 25+), you'll need:
   - **Linux**: `python3`, `make`, `gcc`/`g++` (`sudo apt install build-essential python3` or `pacman -S base-devel python`)
   - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
@@ -138,10 +138,37 @@ Persistent scratchpad that survives across turns. Compensates for limited reason
 | `/memory` | Show working memory |
 | `/plan` | Show current task plan |
 | `/model` | Show/switch model |
+| `/profile` | Show detected model profile + routing mode |
 | `/skill` | Manage reusable skills |
 | `/plugin` | Install/manage plugins |
 | `/sessions` | List/resume saved sessions |
 | `/help` | Show all commands |
+
+## Programmatic API
+
+Use SmallCode as a library in your own tools, CI pipelines, or TypeScript frameworks:
+
+```javascript
+const { SmallCode } = require('smallcode');
+
+const agent = new SmallCode({
+  model: 'gemma-4-e4b',
+  baseUrl: 'http://localhost:1234/v1',
+});
+
+// Run a task
+const result = await agent.run("create hello.py that prints hello world");
+console.log(result.filesCreated);  // ['hello.py']
+console.log(result.toolCalls.length);  // 1
+console.log(result.success);  // true
+
+// Subscribe to events
+agent.on('tool_start', ({ name, args }) => console.log(`Using: ${name}`));
+agent.on('tool_end', ({ name, ms }) => console.log(`Done: ${name} (${ms}ms)`));
+agent.on('error', (err) => console.error(err));
+```
+
+Returns a structured `RunResult` with: response text, tool call records, files created/edited, token usage, duration, and success status.
 
 ## Tools
 
