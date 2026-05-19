@@ -128,6 +128,7 @@ class FullScreenTUI {
     // Command palette
     this.commandPaletteOpen = false;
     this.commandPaletteSelection = 0;
+    this._paletteScrollOffset = 0;
     this.commands = [
       { cmd: '/quit', alias: '/q', desc: 'Exit SmallCode' },
       { cmd: '/clear', alias: null, desc: 'Reset conversation' },
@@ -468,44 +469,62 @@ class FullScreenTUI {
 
     if (filtered.length === 0) return '';
 
-    // Clamp selection
+    // Clamp selection to valid range
     this.commandPaletteSelection = Math.max(0, Math.min(this.commandPaletteSelection, filtered.length - 1));
 
-    // Calculate palette dimensions
-    const maxVisible = Math.min(filtered.length, 10);
+    // Calculate how many items can fit above the input box
+    // Leave 2 rows for the top/bottom borders of the palette box + 1 buffer row
+    const availableRows = inputRow - 3;
+    const maxVisible = Math.max(1, Math.min(filtered.length, availableRows, 12));
+    this._paletteMaxVisible = maxVisible; // Store for arrow key handler
+
+    // Keep scroll offset in sync with selection
+    if (this.commandPaletteSelection < this._paletteScrollOffset) {
+      this._paletteScrollOffset = this.commandPaletteSelection;
+    } else if (this.commandPaletteSelection >= this._paletteScrollOffset + maxVisible) {
+      this._paletteScrollOffset = this.commandPaletteSelection - maxVisible + 1;
+    }
+    this._paletteScrollOffset = Math.max(0, Math.min(this._paletteScrollOffset, filtered.length - maxVisible));
+
     const paletteWidth = Math.min(this.width - 4, 50);
     const startRow = inputRow - maxVisible - 1;
+    const hasMore = filtered.length > maxVisible;
 
-    // Draw palette box
+    // Draw top border (with count if scrollable)
     buf += ANSI.moveTo(startRow, 2);
-    buf += this.theme.border + BOX.rTopLeft + BOX.horizontal.repeat(paletteWidth - 2) + BOX.rTopRight + ANSI.reset;
+    const countLabel = hasMore ? ` ${this._paletteScrollOffset + 1}-${Math.min(this._paletteScrollOffset + maxVisible, filtered.length)}/${filtered.length} ` : '';
+    const topFill = paletteWidth - 2 - countLabel.length;
+    buf += this.theme.border + BOX.rTopLeft + BOX.horizontal.repeat(Math.max(0, topFill)) + (hasMore ? this.theme.muted + countLabel + this.theme.border : '') + BOX.rTopRight + ANSI.reset;
 
+    // Draw visible items (windowed by scroll offset)
     for (let i = 0; i < maxVisible; i++) {
-      const cmd = filtered[i];
-      const isSelected = i === this.commandPaletteSelection;
+      const itemIdx = i + this._paletteScrollOffset;
+      if (itemIdx >= filtered.length) break;
+      const cmd = filtered[itemIdx];
+      const isSelected = itemIdx === this.commandPaletteSelection;
       const row = startRow + 1 + i;
 
       buf += ANSI.moveTo(row, 2);
       buf += this.theme.border + BOX.vertical + ANSI.reset;
 
-      if (isSelected) {
-        buf += ANSI.inverse;
-      }
+      if (isSelected) buf += ANSI.inverse;
 
       const cmdText = cmd.cmd + (cmd.alias ? ` (${cmd.alias})` : '');
-      const descText = cmd.desc;
-      const line = ` ${cmdText.padEnd(16)} ${descText}`;
+      const line = ` ${cmdText.padEnd(16)} ${cmd.desc}`;
       buf += (isSelected ? this.theme.accent : this.theme.fg) + line.slice(0, paletteWidth - 3).padEnd(paletteWidth - 3);
 
-      if (isSelected) {
-        buf += ANSI.reset;
-      }
-
+      if (isSelected) buf += ANSI.reset;
       buf += ANSI.reset + this.theme.border + BOX.vertical + ANSI.reset;
     }
 
+    // Draw bottom border (with scroll hint if there are hidden items below)
     buf += ANSI.moveTo(startRow + maxVisible + 1, 2);
-    buf += this.theme.border + BOX.rBottomLeft + BOX.horizontal.repeat(paletteWidth - 2) + BOX.rBottomRight + ANSI.reset;
+    const scrollHint = hasMore && this._paletteScrollOffset + maxVisible < filtered.length ? ' ↓ more' : '';
+    const scrollHintUp = hasMore && this._paletteScrollOffset > 0 ? ' ↑ ' : '';
+    buf += this.theme.border + BOX.rBottomLeft + BOX.horizontal.repeat(Math.max(0, paletteWidth - 2 - scrollHint.length - scrollHintUp.length));
+    if (scrollHintUp) buf += this.theme.muted + scrollHintUp + this.theme.border;
+    if (scrollHint) buf += this.theme.muted + scrollHint + this.theme.border;
+    buf += BOX.rBottomRight + ANSI.reset;
 
     return buf;
   }
@@ -584,6 +603,7 @@ class FullScreenTUI {
         }
         this.commandPaletteOpen = false;
         this.commandPaletteSelection = 0;
+        this._paletteScrollOffset = 0;
         // Fall through to execute the command below (don't return)
       }
 
@@ -609,6 +629,7 @@ class FullScreenTUI {
     if (key === '\x1b' && this.commandPaletteOpen) {
       this.commandPaletteOpen = false;
       this.commandPaletteSelection = 0;
+      this._paletteScrollOffset = 0;
       this.render();
       return;
     }
@@ -634,6 +655,10 @@ class FullScreenTUI {
     if (key === '\x1b[A') { // Up — history or palette navigation
       if (this.commandPaletteOpen) {
         this.commandPaletteSelection = Math.max(0, this.commandPaletteSelection - 1);
+        // Scroll offset: keep selection visible at top
+        if (this.commandPaletteSelection < this._paletteScrollOffset) {
+          this._paletteScrollOffset = this.commandPaletteSelection;
+        }
         this.render();
         return;
       }
@@ -647,7 +672,16 @@ class FullScreenTUI {
     }
     if (key === '\x1b[B') { // Down — history or palette navigation
       if (this.commandPaletteOpen) {
-        this.commandPaletteSelection++;
+        const filter = this.inputBuffer.slice(1).toLowerCase();
+        const filteredLen = this.commands.filter(c =>
+          c.cmd.slice(1).startsWith(filter) || (c.alias && c.alias.slice(1).startsWith(filter))
+        ).length;
+        this.commandPaletteSelection = Math.min(filteredLen - 1, this.commandPaletteSelection + 1);
+        // Scroll offset: keep selection visible at bottom
+        const maxVis = this._paletteMaxVisible || 8;
+        if (this.commandPaletteSelection >= this._paletteScrollOffset + maxVis) {
+          this._paletteScrollOffset = this.commandPaletteSelection - maxVis + 1;
+        }
         this.render();
         return;
       }
@@ -742,8 +776,10 @@ class FullScreenTUI {
         if (this.inputBuffer.startsWith('/')) {
           this.commandPaletteOpen = true;
           this.commandPaletteSelection = 0;
+          this._paletteScrollOffset = 0;
         } else {
           this.commandPaletteOpen = false;
+          this._paletteScrollOffset = 0;
         }
 
         this.render();
