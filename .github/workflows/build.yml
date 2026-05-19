@@ -1,0 +1,89 @@
+# Builds smallcode for Windows, macOS, and Linux.
+# On tag push (v*) creates a GitHub Release with platform-specific portable
+# tarballs containing pre-built JS + all production node_modules (including
+# pre-compiled native addons). Users extract and run without ever needing
+# node-gyp / C++ build tools.
+
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies (including optional – compiles native addons)
+        run: npm ci --include=optional
+
+      - name: Compile TypeScript → JavaScript
+        run: npm run build
+
+      - name: Strip dev dependencies (keep prod + optional only)
+        run: npm prune --omit=dev
+
+      - name: Package platform-specific tarball
+        run: |
+          PLATFORM_TAG="${{ runner.os }}-${{ runner.arch }}"
+          mkdir -p _staging/smallcode
+
+          # Copy production files
+          cp -r bin           _staging/smallcode/
+          cp -r src           _staging/smallcode/
+          cp -r node_modules  _staging/smallcode/
+          cp package.json     _staging/smallcode/
+          cp package-lock.json _staging/smallcode/
+          cp README.md        _staging/smallcode/ 2>/dev/null || true
+          cp LICENSE          _staging/smallcode/ 2>/dev/null || true
+
+          # Remove TypeScript sources from compiled/ – ship .js only
+          find _staging/smallcode/src/compiled -name '*.ts' -delete
+          rm -f _staging/smallcode/src/compiled/tsconfig.json
+
+          # Create tarball
+          cd _staging && tar czf "../smallcode-${PLATFORM_TAG}.tar.gz" smallcode/
+          cd .. && rm -rf _staging
+          du -sh "smallcode-${PLATFORM_TAG}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smallcode-${{ runner.os }}-${{ runner.arch }}
+          path: smallcode-*.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smallcode-*
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh smallcode-*.tar.gz
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: smallcode-*.tar.gz
+          generate_release_notes: true
