@@ -230,6 +230,34 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         return;
       }
 
+      case '/mcp': {
+        const { MCPClient } = require('../src/tools/mcp_client');
+        const client = new MCPClient(process.cwd());
+        const serverCount = client.loadConfig();
+        if (serverCount === 0) {
+          console.log(chalk.gray('  No MCP servers configured.'));
+          console.log(chalk.gray('  Add .smallcode/mcp.json to connect external tools.'));
+          console.log(chalk.gray('  Example: { "mcpServers": { "github": { "command": "uvx", "args": ["mcp-server-github"] } } }'));
+        } else {
+          // Check if global mcpClient is connected
+          if (typeof mcpClient !== 'undefined' && mcpClient) {
+            const status = mcpClient.status();
+            console.log(chalk.bold(`  MCP Servers (${status.length}):`));
+            for (const s of status) {
+              const state = s.connected ? chalk.green('● connected') : chalk.red('○ disconnected');
+              console.log(`    ${state} ${chalk.cyan(s.name)} (${s.command})`);
+              if (s.tools.length) console.log(`      Tools: ${s.tools.join(', ')}`);
+            }
+          } else {
+            console.log(chalk.gray(`  ${serverCount} server(s) configured but not yet connected.`));
+            console.log(chalk.gray('  They connect automatically on first tool use.'));
+          }
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
       case '/skill': {
         const { SkillManager } = require('../src/plugins/skills');
         const sm = new SkillManager(process.cwd());
@@ -545,6 +573,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/compact')}       ${chalk.gray('Trim conversation history')}`);
         console.log(`  ${chalk.cyan('/escalation')}    ${chalk.gray('View model escalation status')}`);
         console.log(`  ${chalk.cyan('/profile')}       ${chalk.gray('Show detected model profile')}`);
+        console.log(`  ${chalk.cyan('/mcp')}           ${chalk.gray('Show connected MCP servers')}`);
         console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
         console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);
         console.log(`  ${chalk.cyan('/sessions')}      ${chalk.gray('List/resume saved sessions')}`);

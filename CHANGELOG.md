@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.19] - 2026-05-18
+
+### Added
+- **MCP Client** — SmallCode can now consume external MCP servers as tool providers. Configure in `.smallcode/mcp.json` or `~/.config/smallcode/mcp.json`. Tools from connected servers are auto-registered and available to the model.
+  - MarrowScript source: `src/tools/mcp_client.ms`
+  - JS runtime: `src/tools/mcp_client.js`
+- **`/mcp` command** — Shows connected MCP servers and their available tools.
+- MCP tools appear in the model's tool list as `mcp__serverName__toolName`.
+
 ## [0.4.18] - 2026-05-18
 
 ### Added

@@ -56,6 +56,7 @@ const { EscalationEngine } = require('./escalation');
 const { EarlyStopDetector } = require('../src/governor/early_stop');
 const { getRoutingMode, getCategorySelectorTool, getToolsForCategory } = require('../src/tools/two_stage_router');
 const { getProfile } = require('../src/model/profiles');
+const { MCPClient } = require('../src/tools/mcp_client');
 const { PluginLoader } = require('../src/plugins/loader');
 const { SkillManager } = require('../src/plugins/skills');
 const { SessionStore } = require('../src/session/persistence');
@@ -97,7 +98,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.4.18';
+const VERSION = '0.4.19';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -1141,6 +1142,12 @@ async function executeTool(name, args) {
     }
 
     default: {
+      // Try MCP client tools first
+      if (typeof mcpClient !== 'undefined' && mcpClient && mcpClient.isMCPTool(name)) {
+        const mcpResult = await mcpClient.callTool(name, args);
+        if (mcpResult.error) return { error: mcpResult.error };
+        return { result: mcpResult.result || '(no output)' };
+      }
       // Try plugin tools before giving up
       if (pluginLoader) {
         const pluginResult = await pluginLoader.executeTool(name, args);
@@ -1207,7 +1214,8 @@ const COMPOUND_TOOLS = [
 // Routing-aware: for small-context models, returns category selector only (Stage 1)
 function getAllTools(config, stage2Category) {
   const pluginTools = pluginLoader ? pluginLoader.getTools() : [];
-  const allTools = [...TOOLS, ...COMPOUND_TOOLS, ...pluginTools];
+  const mcpTools = (typeof mcpClient !== 'undefined' && mcpClient) ? mcpClient.getToolDefs() : [];
+  const allTools = [...TOOLS, ...COMPOUND_TOOLS, ...pluginTools, ...mcpTools];
 
   // Determine routing mode from model profile
   const contextWindow = config?.context?.detected_window || 32768;
@@ -2355,6 +2363,19 @@ async function main() {
   // Initialize plugins and skills
   pluginLoader = new PluginLoader(process.cwd()).loadAll();
   skillManager = new SkillManager(process.cwd());
+
+  // Initialize MCP client (connect to external MCP servers)
+  let mcpClient = null;
+  const mcpClientInstance = new MCPClient(process.cwd());
+  if (mcpClientInstance.loadConfig() > 0) {
+    mcpClient = mcpClientInstance;
+    // Connect asynchronously — don't block boot
+    mcpClient.connectAll().then(toolCount => {
+      if (toolCount > 0 && _fullscreenRef) {
+        _fullscreenRef.addTool('mcp-client', 'ok', `${toolCount} external tools from ${mcpClient.servers.size} servers`);
+      }
+    }).catch(() => {});
+  }
 
   // Initialize session + token tracking
   sessionStore = new SessionStore(process.cwd());
