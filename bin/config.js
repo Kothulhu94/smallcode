@@ -13,6 +13,7 @@ function loadConfig(flags = {}) {
       provider: env.SMALLCODE_PROVIDER || 'openai',
       name: env.SMALLCODE_MODEL || '',
       baseUrl: env.SMALLCODE_BASE_URL || (env.OLLAMA_HOST ? (env.OLLAMA_HOST + '/v1') : 'http://localhost:1234/v1'),
+      timeout: parseInt(env.SMALLCODE_MODEL_TIMEOUT) || 300, // seconds; 5 min default for slow hardware
     },
     context: {
       max_budget_pct: parseInt(env.SMALLCODE_CONTEXT_BUDGET) || 70,
@@ -68,6 +69,8 @@ function loadConfig(flags = {}) {
           if (b) config.model.baseUrl = b[1].trim();
           const p = line.match(/^provider\s*=\s*"?([^"#]+)"?/);
           if (p) config.model.provider = p[1].trim();
+          const to = line.match(/^timeout\s*=\s*(\d+)/);
+          if (to) config.model.timeout = parseInt(to[1]);
         }
         break;
       } catch {}

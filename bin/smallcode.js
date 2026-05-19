@@ -121,7 +121,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.6.12';
+const VERSION = '0.6.13';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -1300,16 +1300,37 @@ async function chatCompletion(config, messages) {
       headers['X-Title'] = 'SmallCode';
     }
 
-    // Timeout: abort if model doesn't respond in 120s (prevents permanent hang)
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000);
+    // Timeout: abort if model doesn't respond within configured limit.
+    // Default 300s (5 min) — enough for slow hardware (RK3588, CPU inference).
+    // Override via SMALLCODE_MODEL_TIMEOUT env var (seconds) or smallcode.toml model.timeout.
+    const timeoutSecs = parseInt(process.env.SMALLCODE_MODEL_TIMEOUT)
+      || config.model?.timeout
+      || 300;
+    const timeoutMs = timeoutSecs * 1000;
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (fetchErr) {
+      clearTimeout(timeout);
+      // Distinguish timeout from unreachable endpoint
+      if (fetchErr.name === 'AbortError' || fetchErr.message?.includes('abort')) {
+        const msg = `Model timed out after ${timeoutSecs}s. The model is still processing or the endpoint is unresponsive.\n  Tip: increase timeout with SMALLCODE_MODEL_TIMEOUT=600 in your .env`;
+        console.log(`  \x1b[33m⏱ ${msg}\x1b[0m`);
+        if (_fullscreenRef) _fullscreenRef.addTool('timeout', 'err', `no response after ${timeoutSecs}s`);
+      } else {
+        console.log(`  \x1b[31m✗ ${fetchErr.message}\x1b[0m`);
+      }
+      return null;
+    }
     clearTimeout(timeout);
 
     if (!response.ok) {
