@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.5.0] - 2026-05-18
+
+### Added
+- **Programmatic API** — `const { SmallCode } = require('smallcode')`. Run prompts, subscribe to events, get structured results.
+- **MCP Client** — Consume external MCP servers as tool providers. Configure in `.smallcode/mcp.json`.
+- **Early-Stop Detection** — Catches repetition loops, patch spirals, and greeting regression automatically.
+- **2-Stage Tool Router** — Reduces schema context by ~50% for small-context models (≤16k).
+- **Model Profiles** — Auto-detects Gemma/Qwen/DeepSeek/Llama capabilities from model name.
+- **`-P` / `--prompt` flag** — Run a single prompt: `smallcode -P "fix the bug"`.
+- **`/profile` command** — Shows detected model profile and routing mode.
+- **`/mcp` command** — Shows connected external MCP servers.
+- **E2E Test Suite** — 10 tests covering math, file ops, patching, search, graph, and architecture prompts.
+
+### Fixed
+- **Auth headers in all API paths** — chatCompletion, streamFinalResponse, sendToModel, and startup health check all send `Authorization: Bearer` when API key is configured.
+- **OpenRouter support** — Required `HTTP-Referer` and `X-Title` headers added automatically.
+- **`/escalation` command crash** — `escalationEngine` was out of scope in command handler.
+- **`-v` flag collision** — `-v` is version, `-V` is verbose.
+- **VERSION constant** — Aligned across all files.
+- **Auto-compact preserves system messages** — Skills and plugin injections no longer evicted.
+- **"Exit code undefined"** — Properly reports timeout instead of undefined.
+- **Native deps optional** — `better-sqlite3` moved to optionalDependencies. Install no longer needs C++ build tools.
+- **Patch spiral recovery** — After 4 failed patches, forces `write_file` rewrite instead of infinite loop.
+- **Streaming repetition detection** — Halts generation when model repeats itself.
+
+### Changed
+- **Modular architecture** — Monolithic `bin/smallcode.js` (2181 lines) split into focused modules:
+  - `bin/config.js` (165 lines) — Config + endpoint detection
+  - `bin/mcp_bridge.js` (151 lines) — Code graph MCP
+  - `bin/executor.js` (338 lines) — Tool execution
+  - `bin/model_client.js` (284 lines) — LLM communication
+  - `bin/tools.js` (64 lines) — Tool definitions + routing
+  - `bin/smallcode.js` now 1570 lines (28% reduction)
+- Dependencies pinned to exact versions.
+- `.env` excluded from npm package.
+- README updated with accurate requirements and architecture.
+
 ## [0.4.19] - 2026-05-18
 
 ### Added

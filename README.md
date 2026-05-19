@@ -74,20 +74,27 @@ SmallCode is built with a modular architecture:
 
 ```
 bin/
-├── smallcode.js        Main entry point + agent loop
+├── smallcode.js        Entry point, agent loop, TUI orchestration (1570 lines)
+├── config.js           Config loading, endpoint detection, auth headers
+├── executor.js         Tool execution (all 18 tools)
+├── tools.js            Tool definitions + 2-stage routing
+├── mcp_bridge.js       Built-in code graph MCP communication
+├── model_client.js     LLM API calls, streaming, validation
 ├── governor.js         Tool scoring, verification, decompose
-├── escalation.js       Cloud model fallback (Claude/OpenAI)
+├── escalation.js       Cloud model fallback (Claude/OpenAI/DeepSeek)
 ├── commands.js         TUI slash commands
 ├── tui.js              Classic TUI renderer
 └── bonescript_guide.js BoneScript syntax reference
 
 src/
+├── api/index.js        Programmatic API (require('smallcode'))
 ├── tui/fullscreen.js   Fullscreen alternate-buffer TUI
 ├── plugins/loader.js   Plugin system
 ├── plugins/skills.js   Skill system
-├── tools/builtin/      Tool implementations
-├── governor/           Verifier, scorer, hard fail
-└── core/               Config, events, session
+├── tools/              Tool routing, MCP client, validators
+├── governor/           Early-stop detection, verifier, tool scorer
+├── model/              Multi-model profiles + routing
+└── session/            Persistence, undo, sharing, references
 ```
 
 ## Key Features
