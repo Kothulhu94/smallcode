@@ -62,3 +62,7 @@ marrow.toml
 .test-runs/
 
 .test-workspace/
+
+# MarrowScript test files
+*.marrow
+!marrow/smallcode_cognition.marrow
