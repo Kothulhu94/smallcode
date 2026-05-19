@@ -59,6 +59,7 @@ try {
 const { ToolScorer, checkAndEnforceHardFail, classifyTask, classifyTaskAsync } = require('./governor');
 const { EscalationEngine } = require('./escalation');
 const { EarlyStopDetector } = require('../src/governor/early_stop');
+const { TokenMonitor } = require('./token_monitor');
 const { getProfile } = require('../src/model/profiles');
 const { MCPClient } = require('../src/tools/mcp_client');
 const { PluginLoader } = require('../src/plugins/loader');
@@ -86,6 +87,7 @@ try {
 // Initialize governor (tool scoring + verification)
 const toolScorer = new ToolScorer();
 const earlyStop = new EarlyStopDetector();
+const tokenMonitor = new TokenMonitor();
 let currentTaskType = 'coding';
 let config = null; // Set in main(), used by executeTool and chatCompletion
 
@@ -1212,6 +1214,9 @@ async function chatCompletion(config, messages) {
     // Track token usage
     if (tokenTracker && data?.usage) {
       tokenTracker.record(data, config.model.name);
+    }
+    if (data?.usage) {
+      tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
     }
 
     // Auto-save session periodically
