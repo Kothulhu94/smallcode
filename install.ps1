@@ -58,7 +58,15 @@ Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpFile -UseBasicParsing
 # ---- extract --------------------------------------------------------------
 Write-Host "==> Extracting ..."
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-tar -xzf $tmpFile -C $InstallDir --strip-components=1
+
+# Use system tar to avoid Git Bash/MSYS2 tar's path issues on Windows
+$tarBin = if (Test-Path "$env:SystemRoot\System32\tar.exe") {
+  "$env:SystemRoot\System32\tar.exe"
+} else {
+  "tar"
+}
+Write-Host "    Using tar: $tarBin"
+& $tarBin -xzf $tmpFile -C $InstallDir --strip-components=1
 
 # Remove temporary files
 Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
@@ -68,15 +76,24 @@ $launcherCmd = Join-Path $InstallDir "smallcode.cmd"
 @"
 @echo off
 set "NODE_PATH=%~dp0node_modules"
-"%~dp0node_modules\.bin\node.cmd" "%~dp0bin\smallcode.js" %*
+node "%~dp0bin\smallcode.js" %*
 "@ | Out-File -FilePath $launcherCmd -Encoding ascii
 
 # Also create a PowerShell launcher
 $launcherPs = Join-Path $InstallDir "smallcode.ps1"
 @"
 `$env:NODE_PATH = Join-Path `$PSScriptRoot "node_modules"
-node (Join-Path `$PSScriptRoot "bin\smallcode.js") `$args
+& "node" (Join-Path `$PSScriptRoot "bin\smallcode.js") `$args
 "@ | Out-File -FilePath $launcherPs -Encoding ascii
+
+# ---- warn about shadowed install ------------------------------------------
+$existingCmd = Get-Command "smallcode" -ErrorAction SilentlyContinue
+if ($existingCmd -and $existingCmd.Source -notlike "$InstallDir*") {
+  Write-Host "==> WARNING: 'smallcode' already resolves to $($existingCmd.Source)"
+  Write-Host "    The new install at $InstallDir will NOT be used."
+  Write-Host "    To fix: remove the old install, then restart your terminal."
+  Write-Host ""
+}
 
 # ---- add to PATH ----------------------------------------------------------
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
