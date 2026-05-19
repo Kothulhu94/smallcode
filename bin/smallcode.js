@@ -48,6 +48,7 @@ const chalk = tui.chalk;
 const { loadConfig: loadConfigModule, checkEndpoint } = require('./config');
 const { TOOLS, COMPOUND_TOOLS, getAllTools: _getAllToolsModule } = require('./tools');
 const { runValidation: _runValidationModule } = require('./model_client');
+const { mcpCall, initCodeGraph, killMCP, getMcpProcess } = require('./mcp_bridge');
 let McpMemoryStore;
 try {
   McpMemoryStore = require('budget-aware-mcp/dist/memory/store.js').MemoryStore;
@@ -106,169 +107,8 @@ const LOGO = `
   AI coding agent for small LLMs
 `;
 
-// ─── Built-in MCP: budget-aware-mcp for code intelligence ───────────────────
-
-let mcpProcess = null;
-
-function startCodeGraphMCP() {
-  // Try to find budget-aware-mcp
-  const possiblePaths = [
-    path.join(__dirname, '..', '..', 'code-graph-mcp', 'dist', 'index.js'),
-    path.join(__dirname, '..', 'node_modules', 'budget-aware-mcp', 'dist', 'index.js'),
-    path.join(__dirname, '..', 'node_modules', '.package-lock.json'), // trigger re-check
-  ];
-
-  let mcpPath = null;
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) { mcpPath = p; break; }
-  }
-
-  // Also check if the linked package has a dist/index.js
-  if (!mcpPath) {
-    const linkedPath = path.join(__dirname, '..', 'node_modules', 'budget-aware-mcp');
-    if (fs.existsSync(linkedPath)) {
-      const realPath = fs.realpathSync(linkedPath);
-      const candidate = path.join(realPath, 'dist', 'index.js');
-      if (fs.existsSync(candidate)) mcpPath = candidate;
-    }
-  }
-
-  // Try global install
-  if (!mcpPath) {
-    try {
-      const { execSync } = require('child_process');
-      const globalPath = execSync('npm root -g', { encoding: 'utf-8' }).trim();
-      const gp = path.join(globalPath, 'budget-aware-mcp', 'dist', 'index.js');
-      if (fs.existsSync(gp)) mcpPath = gp;
-    } catch {}
-  }
-
-  if (!mcpPath) {
-    return null;
-  }
-
-  // Start the MCP server as a child process (stdio transport)
-  const child = spawn('node', [mcpPath], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    cwd: process.cwd(),
-  });
-
-  child.on('error', () => {});
-  child.on('exit', () => { mcpProcess = null; });
-
-  mcpProcess = child;
-  return child;
-}
-
-let mcpRequestId = 1;
-async function mcpCall(method, params = {}) {
-  if (!mcpProcess) return null;
-
-  return new Promise((resolve) => {
-    if (!mcpProcess || !mcpProcess.stdout || !mcpProcess.stdin) { resolve(null); return; }
-
-    const id = mcpRequestId++;
-    const request = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
-
-    let buffer = '';
-    const onData = (chunk) => {
-      buffer += chunk.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const resp = JSON.parse(line);
-          if (resp.id === id) {
-            mcpProcess.stdout.off('data', onData);
-            resolve(resp.result || null);
-          }
-        } catch {}
-      }
-    };
-
-    mcpProcess.stdout.on('data', onData);
-    mcpProcess.stdin.write(request);
-
-    // Timeout after 5s
-    setTimeout(() => {
-      if (mcpProcess) mcpProcess.stdout.off('data', onData);
-      resolve(null);
-    }, 5000);
-  });
-}
-
-async function initCodeGraph() {
-  const child = startCodeGraphMCP();
-  if (!child) return false;
-
-  // Initialize
-  const initResult = await mcpCall('initialize', {
-    protocolVersion: '2024-11-05',
-    capabilities: {},
-    clientInfo: { name: 'smallcode', version: VERSION },
-  });
-
-  if (!initResult) {
-    mcpProcess = null;
-    return false;
-  }
-
-  // Check what's already indexed — don't re-index if repos exist
-  const listResult = await mcpCall('tools/call', {
-    name: 'list_repos',
-    arguments: {},
-  });
-
-  let alreadyIndexed = 0;
-  if (listResult && listResult.content) {
-    try {
-      const data = JSON.parse(listResult.content[0]?.text || '{}');
-      alreadyIndexed = data.total || 0;
-    } catch {}
-  }
-
-  if (alreadyIndexed > 0) {
-    // Already have indexed repos — skip re-indexing
-    return true;
-  }
-
-  // No repos indexed yet — discover sub-projects and index each
-  const cwd = process.cwd();
-  const subProjects = [];
-  try {
-    const entries = fs.readdirSync(cwd, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'venv') continue;
-      const subPath = path.join(cwd, entry.name);
-      // Check if it has source files (package.json, Cargo.toml, go.mod, src/, etc.)
-      const markers = ['package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'src'];
-      const hasMarker = markers.some(m => fs.existsSync(path.join(subPath, m)));
-      if (hasMarker) {
-        subProjects.push({ path: subPath, name: entry.name });
-      }
-    }
-  } catch {}
-
-  if (subProjects.length > 0) {
-    // Index each sub-project
-    for (const proj of subProjects.slice(0, 8)) { // Cap at 8 to avoid long init
-      await mcpCall('tools/call', {
-        name: 'index_repo',
-        arguments: { path: proj.path, name: proj.name },
-      });
-    }
-  } else {
-    // Single project — index cwd directly
-    await mcpCall('tools/call', {
-      name: 'index_repo',
-      arguments: { path: cwd, name: path.basename(cwd) },
-    });
-  }
-
-  return true;
-}
+// ─── Built-in MCP: code graph (delegated to mcp_bridge.js) ──────────────────
+// mcpCall, initCodeGraph, killMCP imported from ./mcp_bridge
 
 // ─── Arg Parsing ─────────────────────────────────────────────────────────────
 
@@ -408,7 +248,7 @@ async function runTUI(config) {
         if (cmd === '/quit' || cmd === '/q' || cmd === '/exit') {
           if (sessionStore) sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
           screen.leave();
-          if (mcpProcess) { mcpProcess.kill(); mcpProcess = null; }
+          killMCP()
           process.exit(0);
         }
         // Capture command output by temporarily redirecting stdout + console.log
@@ -438,7 +278,7 @@ async function runTUI(config) {
         if (sessionStore) {
           sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
         }
-        if (mcpProcess) { mcpProcess.kill(); mcpProcess = null; }
+        killMCP()
         process.exit(0);
       },
     });
@@ -512,7 +352,7 @@ async function runTUI(config) {
   });
 
   rl.on('close', () => {
-    if (mcpProcess) { mcpProcess.kill(); mcpProcess = null; }
+    killMCP()
     console.log(chalk.gray('\n  Goodbye!\n'));
     process.exit(0);
   });
