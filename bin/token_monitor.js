@@ -10,6 +10,7 @@ class TokenMonitor {
     this.totalCalls = 0;
     this.compactions = 0;
     this.evictions = 0;
+    this._nextCallIsNewTurn = false;
   }
 
   /**
@@ -20,8 +21,9 @@ class TokenMonitor {
     this.totalCompletion += completionTokens || 0;
     this.totalCalls++;
 
-    if (!this.turns.length || metadata.newTurn) {
+    if (!this.turns.length || metadata.newTurn || this._nextCallIsNewTurn) {
       this.turns.push({ calls: 0, promptTokens: 0, completionTokens: 0, toolCalls: 0 });
+      this._nextCallIsNewTurn = false;
     }
     const turn = this.turns[this.turns.length - 1];
     turn.calls++;

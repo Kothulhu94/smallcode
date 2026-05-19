@@ -60,6 +60,8 @@ const { ToolScorer, checkAndEnforceHardFail, classifyTask, classifyTaskAsync } =
 const { EscalationEngine } = require('./escalation');
 const { EarlyStopDetector } = require('../src/governor/early_stop');
 const { TokenMonitor } = require('./token_monitor');
+const { TraceRecorder } = require('./trace_recorder');
+const { EvalRunner } = require('./eval_runner');
 const { getProfile } = require('../src/model/profiles');
 const { MCPClient } = require('../src/tools/mcp_client');
 const { PluginLoader } = require('../src/plugins/loader');
@@ -88,6 +90,7 @@ try {
 const toolScorer = new ToolScorer();
 const earlyStop = new EarlyStopDetector();
 const tokenMonitor = new TokenMonitor();
+const traceRecorder = new TraceRecorder(process.cwd());
 let currentTaskType = 'coding';
 let config = null; // Set in main(), used by executeTool and chatCompletion
 
@@ -105,7 +108,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.6.6';
+const VERSION = '0.6.7';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -212,7 +215,7 @@ const improvementAttempts = {}; // filePath → attempt count
 
 async function runTUI(config) {
   const createCommandHandler = require('./commands');
-  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine);
+  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor);
 
   const ok = await checkOllama(config);
   if (!ok && config.model.provider === 'ollama') {
@@ -396,6 +399,12 @@ const MAX_IMPROVE_ITERATIONS = 2;
 async function runAgentLoop(userMessage, config) {
   // Reset early-stop state for new turn
   earlyStop.newTurn();
+
+  // Start trace recording for this turn
+  traceRecorder.start(userMessage, config.model.name);
+
+  // Mark new turn in token monitor (next recordCall will start a new turn entry)
+  tokenMonitor._nextCallIsNewTurn = true;
 
   // Clarification loop — detect vague prompts before wasting tool calls
   const { needsClarification, getClarificationInstruction } = require('../src/session/clarify');
@@ -603,6 +612,9 @@ async function runAgentLoop(userMessage, config) {
         const result = await executeTool(toolName, toolArgs);
         const toolMs = Date.now() - toolStart2;
 
+        // Record trace step
+        traceRecorder.recordToolCall(toolName, toolArgs, result.result || result.error || '', toolMs);
+
         // Show result indicators
         if (result.error) {
           console.log(tui.toolError(result.error));
@@ -632,6 +644,7 @@ async function runAgentLoop(userMessage, config) {
         });
 
         // ── IMPROVEMENT LOOP: auto-validate writes and feed errors back ──
+        // Uses MarrowScript-compiled bounded loop for iteration control + tracing
         if ((toolName === 'write_file' || toolName === 'patch') && !result.error) {
           const filePath = toolArgs.path;
           const validation = runValidation(filePath);
@@ -639,6 +652,9 @@ async function runAgentLoop(userMessage, config) {
             // Track how many times we've tried fixing this file
             if (!improvementAttempts[filePath]) improvementAttempts[filePath] = 0;
             improvementAttempts[filePath]++;
+
+            // Token monitor: record validation failure (counts as improvement overhead)
+            tokenMonitor.recordCompaction(); // Reuse compaction counter for improvement overhead tracking
 
             if (improvementAttempts[filePath] <= MAX_IMPROVE_ITERATIONS) {
               const attempt = improvementAttempts[filePath];
@@ -956,6 +972,9 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       }
     }
   }
+
+  // Stop trace recording for this turn
+  traceRecorder.stop();
 }
 
 // ─── Validation for Improvement Loop ────────────────────────────────────────
@@ -1217,6 +1236,7 @@ async function chatCompletion(config, messages) {
     }
     if (data?.usage) {
       tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
+      traceRecorder.recordTokens(data.usage.prompt_tokens, data.usage.completion_tokens);
     }
 
     // Auto-save session periodically
@@ -1624,6 +1644,21 @@ async function main() {
   if (flags.init) {
     require('./init');
     return;
+  }
+
+  // Eval mode: run prompt evaluation suites
+  if (flags.eval) {
+    const { EvalRunner } = require('./eval_runner');
+    const evalRunner = new EvalRunner(config);
+    console.log(`\n  Running evaluation: ${flags.eval}\n`);
+    const results = await evalRunner.run(flags.eval, { chatCompletionFn: chatCompletion });
+    if (results.error) {
+      console.log(`  \x1b[31m✗ ${results.error}\x1b[0m`);
+    } else {
+      console.log(EvalRunner.format(results));
+      console.log('');
+    }
+    process.exit(results.error ? 1 : 0);
   }
 
   if (flags.acp) {

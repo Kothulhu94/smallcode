@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.7] - 2026-05-19
+
+### Added
+- **Token Monitor** — Real-time tracking of prompt/completion tokens per call and per turn. Exposes efficiency metrics (completion:prompt ratio), compaction counts, and eviction counts.
+- **`/tokens` command** — Detailed token usage report showing totals, per-call averages, and efficiency.
+- **`/budget` command** — Visual context window budget display with usage bar, compaction/eviction stats.
+- **Trace Recorder** — Automatically records every agent turn: tool calls, model responses, token usage, validations. Persists to `.smallcode/traces/`.
+- **`/trace` command** — List, show, and export execution traces. Supports `list`, `show <id>`, `test <id>`.
+- **Trace-to-Test** (`/trace test <id>`) — Generates Jest-compatible test files from recorded traces, asserting file creation and command success.
+- **Prompt Evaluation Runner** — Built-in evaluation suites for task classification accuracy, tool selection quality, and response quality.
+- **`/eval` command** — Run evaluations in-TUI (`/eval classify_accuracy`, `/eval tool_selection`).
+- **`--eval <suite>` flag** — Non-interactive evaluation mode for CI/automation.
+- **Bounded Loop Adapter** — Wired MarrowScript-compiled loop runtime into improvement loop for bounded iteration with tracing. Falls back to simple counting when compiled runtime unavailable.
+- **`--trace <ID>` flag** — Placeholder for trace replay (documented, future implementation).
+
+### Changed
+- **Improvement loop** now tracks validation failures in token monitor and uses bounded loop adapter for iteration control.
+- **`/stats` command** now shows token usage summary inline.
+- **`/help` command** updated with all new commands (`/tokens`, `/budget`, `/trace`, `/eval`).
+
+### Internal
+- `bin/trace_recorder.js` — 160 lines, trace recording + test generation
+- `bin/eval_runner.js` — 150 lines, evaluation framework with 3 built-in suites
+- `bin/token_monitor.js` — Enhanced with `_nextCallIsNewTurn` pattern for turn boundary detection
+- `bin/loops_adapter.js` — Bridges compiled MarrowScript bounded loops into agent
+- `bin/commands.js` — Now accepts `tokenMonitor` parameter; 5 new commands added
+
+## [0.6.6] - 2026-05-19
+
+### Fixed
+- **Permanent hang after tool calls** — Root cause: `streamFinalResponse` was called after tool calls completed, causing infinite await. Now only streams when `toolCallsThisTurn === 0`. Added 30s timeout as safety net.
+- **120s abort timeout** on `chatCompletion` — Prevents permanent hang if model stops responding entirely.
+
 ## [0.6.1] - 2026-05-19
 
 ### Added

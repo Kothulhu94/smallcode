@@ -162,6 +162,10 @@ Persistent scratchpad that survives across turns. Compensates for limited reason
 | `/quit`, `/q` | Exit SmallCode |
 | `/clear` | Reset conversation |
 | `/stats` | Show session statistics |
+| `/tokens` | Detailed token usage report |
+| `/budget` | Context window budget + visual bar |
+| `/trace` | List/show/export execution traces |
+| `/eval` | Run prompt evaluation suites |
 | `/memory` | Show working memory |
 | `/plan` | Show current task plan |
 | `/model` | Show/switch model |
@@ -172,6 +176,22 @@ Persistent scratchpad that survives across turns. Compensates for limited reason
 | `/plugin` | Install/manage plugins |
 | `/sessions` | List/resume saved sessions |
 | `/help` | Show all commands |
+
+## Observability
+
+SmallCode tracks token usage and execution traces automatically:
+
+- **Token Monitor** — Every LLM call records prompt/completion tokens. View with `/tokens`.
+- **Context Budget** — Visual indicator of context window usage. View with `/budget`.
+- **Execution Traces** — Every agent turn is recorded to `.smallcode/traces/`. View with `/trace list`.
+- **Trace-to-Test** — Generate regression tests from traces: `/trace test <id>`.
+- **Prompt Evaluations** — Measure classifier accuracy and tool selection: `/eval classify_accuracy`.
+
+```bash
+# Run evaluations from CLI
+smallcode --eval classify_accuracy
+smallcode --eval tool_selection
+```
 
 ## Programmatic API
 

@@ -6,7 +6,7 @@ const path = require('path');
 const tui = require('./tui');
 const chalk = tui.chalk;
 
-module.exports = function createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine) {
+module.exports = function createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor) {
 
   return async function handleCommand(cmd, rl) {
     const parts = cmd.split(' ');
@@ -80,9 +80,124 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  History:  ${chalk.white(String(conversationHistory.length))} messages`);
         console.log(`  Files:    ${chalk.white(String(Object.keys(improvementAttempts).filter(k => k !== '__bash').length))} tracked`);
         console.log(`  Dir:      ${chalk.gray(process.cwd())}`);
+        if (tokenMonitor) {
+          console.log(`  Tokens:   ${chalk.white(tokenMonitor.formatShort())}`);
+        }
         console.log('');
         rl.prompt();
         return;
+
+      case '/tokens': {
+        if (!tokenMonitor) {
+          console.log(chalk.gray('  Token monitor not initialized.'));
+        } else {
+          console.log(chalk.bold('  ' + tokenMonitor.formatFull().split('\n').join('\n  ')));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/budget': {
+        const maxCtx = config.context?.detected_window || 128000;
+        const budgetPct = config.context?.max_budget_pct || 70;
+        const maxBudget = Math.round(maxCtx * (budgetPct / 100));
+        const currentEst = conversationHistory.reduce((sum, m) => {
+          const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+          return sum + Math.ceil(c.length / 4);
+        }, 0);
+        const usage = Math.round((currentEst / maxBudget) * 100);
+        const bar = '█'.repeat(Math.min(20, Math.round(usage / 5))) + '░'.repeat(Math.max(0, 20 - Math.round(usage / 5)));
+        console.log(chalk.bold('  Context Budget'));
+        console.log(`  Window:    ${chalk.white(String(maxCtx))} tokens`);
+        console.log(`  Budget:    ${chalk.white(String(maxBudget))} tokens (${budgetPct}%)`);
+        console.log(`  Used:      ${chalk.white(String(currentEst))} tokens (~${usage}%)`);
+        console.log(`  [${usage > 80 ? chalk.red(bar) : usage > 50 ? chalk.yellow(bar) : chalk.green(bar)}]`);
+        if (tokenMonitor) {
+          const m = tokenMonitor.getMetrics();
+          console.log(`  Compacts:  ${chalk.white(String(m.compactions))} | Evictions: ${chalk.white(String(m.evictions))}`);
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/trace': {
+        const { TraceRecorder } = require('./trace_recorder');
+        const tr = new TraceRecorder(process.cwd());
+        const sub = parts[1];
+
+        if (!sub || sub === 'list') {
+          const traces = tr.list();
+          if (traces.length === 0) {
+            console.log(chalk.gray('  No traces recorded yet.'));
+            console.log(chalk.gray('  Traces are recorded automatically for each turn.'));
+          } else {
+            console.log(chalk.bold(`  Traces (${traces.length}):`));
+            for (const t of traces.slice(0, 15)) {
+              const tok = t.tokens ? `${t.tokens.prompt + t.tokens.completion}tok` : '?';
+              console.log(`    ${chalk.cyan(t.id)} ${chalk.white(t.prompt)} ${chalk.gray(`${t.steps} steps, ${tok}, ${t.durationMs}ms`)}`);
+            }
+          }
+        } else if (sub === 'show') {
+          const id = parts[2];
+          if (!id) { console.log(chalk.gray('  Usage: /trace show <id>')); }
+          else {
+            const trace = tr.load(id);
+            if (!trace) { console.log(chalk.red(`  Trace ${id} not found.`)); }
+            else {
+              console.log(chalk.bold(`  Trace ${trace.id}`));
+              console.log(`  Prompt: ${chalk.white(trace.prompt.slice(0, 80))}`);
+              console.log(`  Model:  ${chalk.cyan(trace.model)}`);
+              console.log(`  Tokens: ${trace.tokens.prompt}p + ${trace.tokens.completion}c`);
+              console.log(`  Steps:`);
+              for (const step of trace.steps) {
+                if (step.type === 'tool_call') {
+                  console.log(`    ${chalk.green('⚙')} ${step.name} (${step.durationMs}ms)`);
+                } else if (step.type === 'validation') {
+                  const mark = step.passed ? chalk.green('✓') : chalk.red('✗');
+                  console.log(`    ${mark} validate ${step.filePath}`);
+                }
+              }
+            }
+          }
+        } else if (sub === 'test') {
+          const id = parts[2];
+          if (!id) { console.log(chalk.gray('  Usage: /trace test <id>')); }
+          else {
+            const testCode = tr.generateTest(id);
+            if (!testCode) { console.log(chalk.red(`  Cannot generate test from trace ${id}.`)); }
+            else {
+              const outPath = `.test-workspace/trace_${id}.test.js`;
+              fs.writeFileSync(path.join(process.cwd(), outPath), testCode);
+              console.log(chalk.green(`  ✓ Generated ${outPath}`));
+            }
+          }
+        } else {
+          console.log(chalk.gray('  /trace list          List recorded traces'));
+          console.log(chalk.gray('  /trace show <id>     Show trace details'));
+          console.log(chalk.gray('  /trace test <id>     Generate test from trace'));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/eval': {
+        const { EvalRunner } = require('./eval_runner');
+        const evalRunner = new EvalRunner(config);
+        const suite = parts[1] || 'classify_accuracy';
+        console.log(chalk.gray(`  Running evaluation: ${suite}...`));
+        const results = await evalRunner.run(suite);
+        if (results.error) {
+          console.log(chalk.red(`  ${results.error}`));
+        } else {
+          console.log(EvalRunner.format(results));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
 
       case '/diff': {
         const { execSync } = require('child_process');
@@ -606,10 +721,14 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/escalation')}    ${chalk.gray('View model escalation status')}`);
         console.log(`  ${chalk.cyan('/profile')}       ${chalk.gray('Show detected model profile')}`);
         console.log(`  ${chalk.cyan('/cognition')}     ${chalk.gray('Show MarrowScript cognition layer status')}`);
+        console.log(`  ${chalk.cyan('/tokens')}        ${chalk.gray('Detailed token usage report')}`);
+        console.log(`  ${chalk.cyan('/budget')}        ${chalk.gray('Show context window budget')}`);
         console.log(`  ${chalk.cyan('/mcp')}           ${chalk.gray('Show connected MCP servers')}`);
         console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
         console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);
         console.log(`  ${chalk.cyan('/sessions')}      ${chalk.gray('List/resume saved sessions')}`);
+        console.log(`  ${chalk.cyan('/trace')}         ${chalk.gray('View/export execution traces')}`);
+        console.log(`  ${chalk.cyan('/eval')} <suite>   ${chalk.gray('Run prompt evaluation')}`);
         console.log(`  ${chalk.cyan('/clear')}         ${chalk.gray('Reset entire session')}`);
         console.log(`  ${chalk.cyan('/quit')}          ${chalk.gray('Exit SmallCode')}`);
         console.log('');
