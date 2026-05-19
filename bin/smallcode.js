@@ -121,7 +121,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.6.11';
+const VERSION = '0.6.12';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -1255,17 +1255,26 @@ async function chatCompletion(config, messages) {
   };
 
   try {
+    // Strip ANSI escape codes from all message content before sending to model.
+    // Thinking models (Qwen3, etc.) will reproduce ANSI codes they see in context,
+    // causing corrupted bash commands like "find ... -\x1b[38;2mtype f".
+    function stripAnsiFromMsg(msg) {
+      if (!msg || typeof msg.content !== 'string') return msg;
+      return { ...msg, content: msg.content.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '') };
+    }
+
     // Transform messages with images into multimodal format
     const { extractImages, formatImagesForAPI, modelSupportsVision } = require('../src/session/images');
     const processedMessages = messages.map(msg => {
-      if (msg.role !== 'user' || typeof msg.content !== 'string') return msg;
-      const images = extractImages(msg.content, process.cwd());
-      if (images.length === 0 || !modelSupportsVision(config.model.name)) return msg;
+      const clean = stripAnsiFromMsg(msg);
+      if (clean.role !== 'user' || typeof clean.content !== 'string') return clean;
+      const images = extractImages(clean.content, process.cwd());
+      if (images.length === 0 || !modelSupportsVision(config.model.name)) return clean;
       // Convert to multimodal content array
       return {
-        ...msg,
+        ...clean,
         content: [
-          { type: 'text', text: msg.content },
+          { type: 'text', text: clean.content },
           ...formatImagesForAPI(images),
         ],
       };

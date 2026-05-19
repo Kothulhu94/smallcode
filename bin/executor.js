@@ -20,6 +20,19 @@ async function executeTool(name, args, ctx) {
   const { execSync } = require('child_process');
   const cwd = process.cwd();
 
+  // Sanitize all string args — strip ANSI escape sequences the model may have
+  // hallucinated into command strings (e.g. color codes in bash arguments).
+  // This prevents "find ... -\x1b[38;2;180mtype f" style corrupted commands.
+  function stripAnsi(str) {
+    if (typeof str !== 'string') return str;
+    return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+  }
+  if (args && typeof args === 'object') {
+    for (const key of Object.keys(args)) {
+      if (typeof args[key] === 'string') args[key] = stripAnsi(args[key]);
+    }
+  }
+
   switch (name) {
     case 'read_file': {
       // Normalize path (strip leading ./ and fix slashes)
