@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.16] - 2026-05-18
+
+### Added
+- **`-P` / `--prompt` flag** — Run a single prompt non-interactively: `smallcode -P "fix the bug"`
+- **2-Stage Tool Router wired into agent loop** — Models with ≤16k context now get a `select_category` hint tool that reduces schema overhead. Override with `SMALLCODE_TOOL_ROUTING=direct` or `SMALLCODE_TOOL_ROUTING=two_stage`.
+- **Model Profiles wired into boot** — Auto-detects model family (Gemma, Qwen, DeepSeek, etc.) from name and applies appropriate context window defaults.
+
 ## [0.4.15] - 2026-05-18
 
 ### Added

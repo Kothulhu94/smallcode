@@ -54,6 +54,8 @@ try {
 const { ToolScorer, checkAndEnforceHardFail, classifyTask } = require('./governor');
 const { EscalationEngine } = require('./escalation');
 const { EarlyStopDetector } = require('../src/governor/early_stop');
+const { getRoutingMode, getCategorySelectorTool, getToolsForCategory } = require('../src/tools/two_stage_router');
+const { getProfile } = require('../src/model/profiles');
 const { PluginLoader } = require('../src/plugins/loader');
 const { SkillManager } = require('../src/plugins/skills');
 const { SessionStore } = require('../src/session/persistence');
@@ -95,7 +97,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.4.15';
+const VERSION = '0.4.16';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -284,6 +286,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '--classic') flags.classic = true;
   else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
   else if (arg === '-p' || arg === '--provider') { flags.provider = args[++i]; }
+  else if (arg === '-P' || arg === '--prompt') { flags.prompt = args[++i]; }
   else if (arg === '--eval') { flags.eval = args[++i] || 'classify_accuracy'; }
   else if (arg === '--trace') { flags.trace = args[++i]; }
   else positional.push(arg);
@@ -307,6 +310,7 @@ OPTIONS:
   -V, --verbose           Verbose output (show tool I/O)
   -m, --model <NAME>      Model to use (default: qwen2.5-coder:14b)
   -p, --provider <NAME>   Provider (ollama, openai, anthropic, llamacpp)
+  -P, --prompt <TEXT>     Run a single prompt non-interactively
   -r, --resume            Resume last active session
   --non-interactive       Run single prompt, no TUI
   --classic             Use classic readline TUI (no alternate screen)
@@ -1130,6 +1134,12 @@ async function executeTool(name, args) {
       return { result: content || 'Failed to fetch URL.' };
     }
 
+    case 'select_category': {
+      // 2-stage router: model picked a category. Acknowledge and continue.
+      const category = args.category || 'read';
+      return { result: `Category: ${category}. Proceed with your tool call.`, category };
+    }
+
     default: {
       // Try plugin tools before giving up
       if (pluginLoader) {
@@ -1194,9 +1204,33 @@ const COMPOUND_TOOLS = [
 ];
 
 // Merge compound tools with base tools (plugins added at runtime)
-function getAllTools() {
+// Routing-aware: for small-context models, returns category selector only (Stage 1)
+function getAllTools(config, stage2Category) {
   const pluginTools = pluginLoader ? pluginLoader.getTools() : [];
-  return [...TOOLS, ...COMPOUND_TOOLS, ...pluginTools];
+  const allTools = [...TOOLS, ...COMPOUND_TOOLS, ...pluginTools];
+
+  // Determine routing mode from model profile
+  const contextWindow = config?.context?.detected_window || 32768;
+  const routingOverride = process.env.SMALLCODE_TOOL_ROUTING;
+  const mode = getRoutingMode(contextWindow, routingOverride);
+
+  if (mode === 'two_stage' && !stage2Category) {
+    // Stage 1: return only the category selector tool
+    return [getCategorySelectorTool(), ...allTools];
+    // NOTE: We still include all tools because some models ignore select_category
+    // and call tools directly. The category selector is a HINT, not enforced.
+    // True 2-stage (only category in Stage 1) would be:
+    //   return [getCategorySelectorTool()];
+    // But that breaks models that don't understand the routing dance.
+  }
+
+  if (mode === 'two_stage' && stage2Category) {
+    // Stage 2: return only tools for the selected category
+    return getToolsForCategory(stage2Category, allTools);
+  }
+
+  // Direct mode: all tools
+  return allTools;
 }
 let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS];
 
@@ -1910,7 +1944,7 @@ ${getMemoryContext(messages)}${getSkillContext(messages)}${getPluginPrompts()}`
     const body = {
       model: config.model.name,
       messages: [systemMsg, ...processedMessages],
-      tools: getAllTools(),
+      tools: getAllTools(config),
       temperature: 0.1,
       max_tokens: 4096,
     };
@@ -2285,6 +2319,15 @@ async function main() {
   // Initialize escalation engine
   escalationEngine = new EscalationEngine(config.escalation || {});
 
+  // Detect model profile (drives routing mode, tool format, context budget)
+  const modelProfile = getProfile(config.model.name, config.context.detected_window);
+  if (modelProfile.matched_key) {
+    // Apply profile-detected context window if not already set
+    if (!config.context.detected_window && modelProfile.context_length) {
+      config.context.detected_window = modelProfile.context_length;
+    }
+  }
+
   // Initialize plugins and skills
   pluginLoader = new PluginLoader(process.cwd()).loadAll();
   skillManager = new SkillManager(process.cwd());
@@ -2316,8 +2359,9 @@ async function main() {
     return;
   }
 
-  if (flags.nonInteractive || positional.length > 0) {
-    await runNonInteractive(config, positional.join(' '));
+  if (flags.nonInteractive || flags.prompt || positional.length > 0) {
+    const prompt = flags.prompt || positional.join(' ');
+    await runNonInteractive(config, prompt);
     return;
   }
 
