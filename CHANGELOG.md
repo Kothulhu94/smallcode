@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.6.1] - 2026-05-19
+
+### Added
+- **MarrowScript Cognition Layer** — Compiled from `marrow/smallcode_cognition.marrow`, generates 1400+ lines of production TypeScript runtime with:
+  - Typed prompt callers with retry, timeout, and repair loops
+  - Content-hash prompt caching (0ms on cache hit, 10m TTL)
+  - Structured trace spans with trace_id/span_id for every LLM call
+  - Token budget enforcement per cost class
+  - Deterministic tier-based routing (trivial → simple → complex)
+  - SSRF guard on all outbound requests
+  - Schema validation with repair prompts on failure
+- **Phase A: Compiled Task Classifier** — `classifyTask` now uses LLM-backed classification with cache, falling back to regex. Replaces hand-rolled regex-only approach.
+- **Phase B: Compiled History Compression** — Semantic summarization of old messages before eviction. Preserves key facts instead of just dropping context.
+- **Phase C: Compiled Tier Router** — `coding_router` dispatches to TinyClassifier/SmallCoder/MediumCoder based on complexity score.
+- **`/cognition` command** — Shows live status of the MarrowScript cognition layer (loaded models, prompts, routers).
+- **Blocking command detection** — Refuses to execute server-start commands (`node server.js`, `npm start`, etc.) that would hang the bash tool for 30s.
+- **Mid-turn context eviction** — Every 3 tool calls, checks if history exceeds 60% of context budget and evicts old tool results.
+- **19-test stress suite** — Covers file ops, multi-step tasks, code intelligence, improvement loop, error recovery, and governor routing.
+
+### Fixed
+- **Context overflow on tool-heavy tasks** — Tool results now capped at 4k chars each (was 12k). Prevents context explosion after 5+ tool calls.
+- **Fullscreen response not rendering** — After tool calls, the model's final text response now properly renders via `addChat` instead of swallowed `stdout.write`.
+- **Double output in fullscreen TUI** — Removed redundant `addChat` in `onSubmit` handler.
+- **Mouse scroll + copy/paste** — Enabled mouse tracking for scroll wheel; `Shift+drag` selects text (shown in status bar).
+- **"fetch failed" after bash timeout** — Blocking server commands now refused instead of timing out and corrupting the session.
+- **File not found errors** — Path normalization strips `./` prefix, error shows resolved path for model self-correction.
+- **list_projects output bloat** — Compacted to one line per project (was 6 lines each).
+
+### Changed
+- **Modular architecture complete** — `bin/smallcode.js` split from 2181 → 1570 lines across:
+  - `bin/config.js` (165 lines) — Config + endpoint check
+  - `bin/mcp_bridge.js` (151 lines) — Code graph MCP
+  - `bin/executor.js` (338 lines) — Tool execution
+  - `bin/model_client.js` (284 lines) — LLM communication
+  - `bin/tools.js` (64 lines) — Tool definitions + routing
+  - `bin/cognition_adapter.js` (100 lines) — Bridge to compiled cognition
+- **System prompt 90% smaller** — Task-aware compact prompt (~200 tokens) replaces verbose 2k-token version.
+- **Default context window** — 128k (was 0/auto-detect that often failed).
+- **Cognition logs silent by default** — Set `SMALLCODE_COGNITION_LOG=stderr` to enable structured trace output.
+
 ## [0.5.0] - 2026-05-18
 
 ### Added

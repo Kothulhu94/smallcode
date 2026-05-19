@@ -99,6 +99,26 @@ src/
 
 ## Key Features
 
+### MarrowScript Cognition Layer
+SmallCode's intelligence is declared in [MarrowScript](https://github.com/Doorman11991/MarrowScript) and compiled to a production runtime. One 50-line `.marrow` declaration generates 1400+ lines of TypeScript with caching, retry, validation, traces, and budget enforcement — all for free.
+
+```marrow
+prompt classify_task_type(user_message: string) {
+  model: TinyClassifier
+  timeout: 3s
+  cache: { key: hash(user_message), ttl: 10m }
+  retry: { max_attempts: 2, backoff: fixed, interval: 100ms }
+  constraints: [output in ["coding", "editing", "search", ...]]
+}
+```
+
+The compiled cognition layer provides:
+- **Prompt caching** — 0ms on cache hit, content-hash keys with TTL
+- **Structured traces** — trace_id/span_id for every LLM call (enable with `SMALLCODE_COGNITION_LOG=stderr`)
+- **Tier-based routing** — trivial tasks → tiny model, complex tasks → medium model
+- **Token budgets** — per-cost-class enforcement, never overspend
+- **Validation + repair** — schema checks with auto-retry on malformed output
+
 ### BoneScript Integration
 For Node.js/TypeScript backends, SmallCode uses BoneScript — write ONE `.bone` file and compile it to a complete project (routes, auth, DB, events, migrations, SDK, admin panel, Docker, CI). Reduces 8-15 tool calls to 1-2, dramatically improving reliability with small models.
 
@@ -111,22 +131,22 @@ When the local model hard fails after retry + decompose, SmallCode can optionall
 - DeepSeek V4 / V4 Pro / V4 Flash
 
 ### Context Budget Engine
-Never exceeds your model's context window. Automatically summarizes large files to signatures, evicts old messages, and tracks token usage in real time.
+Never exceeds your model's context window. Tool results capped at 4k chars, mid-turn eviction drops old results when context grows too large, and semantic compression summarizes history instead of dropping it.
 
 ### 2-Stage Tool Routing
 Halves the schema context overhead. Model picks a category (read/write/search/run/plan) first, then gets only relevant tool schemas. Critical for models with 8-16k context.
 
+### Early-Stop Detection
+Detects repetition loops, patch spirals (stuck on corrupted file → forces rewrite), and greeting regression (model lost context → re-injects task). Saves tokens and time.
+
 ### Forgiving Tool Call Parser
 Small models produce messy output. SmallCode parses tool calls from JSON, YAML, XML, Hermes format, or plain text. Auto-repairs common mistakes (wrong param names, type mismatches).
-
-### TODO-Driven Planning
-Complex tasks get decomposed into atomic steps. The model reads a TODO file each turn to know where it is. Each step is validated (lint/compile) before moving on.
 
 ### Patch-First Editing
 Search-and-replace as the primary edit primitive. Small models can't reliably reproduce entire files — they truncate, hallucinate, or drift. `patch` is safer and more context-efficient.
 
-### Early-Stop Detection
-Detects repetition loops and runaway output. Saves tokens and time when a small model starts spinning.
+### TODO-Driven Planning
+Complex tasks get decomposed into atomic steps. The model reads a TODO file each turn to know where it is. Each step is validated (lint/compile) before moving on.
 
 ### Model Profiles
 Per-model configuration: context length, tool format (native/hermes/json/xml/text), chat template, strengths/weaknesses. Auto-adapts prompting strategy.
@@ -146,6 +166,8 @@ Persistent scratchpad that survives across turns. Compensates for limited reason
 | `/plan` | Show current task plan |
 | `/model` | Show/switch model |
 | `/profile` | Show detected model profile + routing mode |
+| `/cognition` | Show MarrowScript cognition layer status |
+| `/mcp` | Show connected external MCP servers |
 | `/skill` | Manage reusable skills |
 | `/plugin` | Install/manage plugins |
 | `/sessions` | List/resume saved sessions |
