@@ -60,6 +60,20 @@ const { ToolScorer, checkAndEnforceHardFail, classifyTask, classifyTaskAsync } =
 const { EscalationEngine } = require('./escalation');
 const { EarlyStopDetector } = require('../src/governor/early_stop');
 const { TokenMonitor } = require('./token_monitor');
+const { TraceRecorder } = require('./trace_recorder');
+const { EvalRunner } = require('./eval_runner');
+const {
+  repairToolCall,
+  summarizeFileCompiled,
+  assertWithinBudget,
+  chargeBudget,
+  getBudgetState,
+  setApprovalHandler,
+  awaitCheckpointDecision,
+  submitCheckpointDecision,
+  retrieveContext,
+  validateEditCompiled,
+} = (() => { try { return require('./features_adapter'); } catch { return {}; } })();
 const { getProfile } = require('../src/model/profiles');
 const { MCPClient } = require('../src/tools/mcp_client');
 const { PluginLoader } = require('../src/plugins/loader');
@@ -88,6 +102,8 @@ try {
 const toolScorer = new ToolScorer();
 const earlyStop = new EarlyStopDetector();
 const tokenMonitor = new TokenMonitor();
+const traceRecorder = new TraceRecorder(process.cwd());
+let currentToolCategory = null; // Set per-turn by compiled tool router
 let currentTaskType = 'coding';
 let config = null; // Set in main(), used by executeTool and chatCompletion
 
@@ -105,7 +121,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.6.6';
+const VERSION = '0.6.10';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -212,7 +228,7 @@ const improvementAttempts = {}; // filePath → attempt count
 
 async function runTUI(config) {
   const createCommandHandler = require('./commands');
-  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine);
+  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor);
 
   const ok = await checkOllama(config);
   if (!ok && config.model.provider === 'ollama') {
@@ -397,6 +413,22 @@ async function runAgentLoop(userMessage, config) {
   // Reset early-stop state for new turn
   earlyStop.newTurn();
 
+  // Start trace recording for this turn
+  traceRecorder.start(userMessage, config.model.name);
+
+  // Mark new turn in token monitor (next recordCall will start a new turn entry)
+  tokenMonitor._nextCallIsNewTurn = true;
+
+  // Feature 3: rate limiting — assert within budget before starting turn
+  try {
+    if (assertWithinBudget) assertWithinBudget('run_turn', {});
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (_fullscreenRef) _fullscreenRef.addTool('policy', 'err', msg);
+    else console.log(`  \x1b[33m⚠ ${msg}\x1b[0m`);
+    // Still proceed — rate limiting is advisory for local use
+  }
+
   // Clarification loop — detect vague prompts before wasting tool calls
   const { needsClarification, getClarificationInstruction } = require('../src/session/clarify');
   if (needsClarification(userMessage)) {
@@ -447,6 +479,36 @@ async function runAgentLoop(userMessage, config) {
   } catch {
     currentTaskType = classifyTask(userMessage);
   }
+
+  // Deterministic tool routing: classify intent → filter tool schemas
+  // Zero tokens, zero latency — compiled from marrow/tool_router.marrow
+  try {
+    const { classifyToolCategory, categoryNeedsTools } = require('../src/compiled/tool_router');
+    const routeResult = classifyToolCategory(userMessage);
+    currentToolCategory = routeResult.category;
+    if (_fullscreenRef && routeResult.confidence > 0.3) {
+      _fullscreenRef.addTool('router', 'ok', `${routeResult.category} (${Math.round(routeResult.confidence * 100)}%)`);
+    }
+  } catch {
+    currentToolCategory = null; // Fall back to all tools
+  }
+
+  // Feature 5: retrieve_context — auto-inject relevant files via code graph
+  // Zero LLM calls; walks symbol graph from user message keywords
+  try {
+    if (retrieveContext && mcpCall) {
+      const ctx = await retrieveContext(userMessage, mcpCall, 6);
+      if (ctx && ctx.files && ctx.files.length > 0) {
+        const contextHint = `[Auto-context: relevant files detected — ${ctx.files.slice(0, 4).join(', ')}]`;
+        // Inject as a system hint into the last user message (non-intrusive)
+        const lastUser = conversationHistory[conversationHistory.length - 1];
+        if (lastUser && lastUser.role === 'user' && typeof lastUser.content === 'string') {
+          lastUser.content = lastUser.content + '\n\n' + contextHint;
+        }
+        if (_fullscreenRef) _fullscreenRef.addTool('context', 'ok', `${ctx.files.length} files, ${ctx.symbols.length} symbols`);
+      }
+    }
+  } catch {} // Never block on context retrieval
 
   // Multi-model routing: pick model based on task complexity (if configured)
   // Phase C: Marrowscript-compiled coding_router for tier-based dispatch.
@@ -582,6 +644,10 @@ async function runAgentLoop(userMessage, config) {
 
     // If model wants to call tools
     if (message.tool_calls && message.tool_calls.length > 0) {
+      // After first tool call, widen to all tools for subsequent iterations
+      // (model may need different categories mid-turn)
+      currentToolCategory = null;
+
       // Add assistant message with tool calls to history
       conversationHistory.push(message);
 
@@ -592,8 +658,26 @@ async function runAgentLoop(userMessage, config) {
         try {
           toolArgs = JSON.parse(tc.function.arguments);
         } catch {
-          toolArgs = {};
-          console.log(`  \x1b[31m✗ Failed to parse args for ${toolName}\x1b[0m`);
+          // Feature 1: repair malformed tool args via compiled repair_tool_call prompt
+          let repaired = false;
+          if (repairToolCall) {
+            try {
+              const toolDef = ALL_TOOLS.find(t => t.function.name === toolName);
+              const schema = toolDef ? JSON.stringify(toolDef.function.parameters).slice(0, 500) : '';
+              const repair = await repairToolCall(tc.function.arguments, 'Invalid JSON', schema);
+              if (repair.ok && repair.repairedCall) {
+                try {
+                  toolArgs = JSON.parse(repair.repairedCall);
+                  repaired = true;
+                  if (_fullscreenRef) _fullscreenRef.addTool('repair', 'ok', `repaired ${toolName} args`);
+                } catch {}
+              }
+            } catch {}
+          }
+          if (!repaired) {
+            toolArgs = {};
+            console.log(`  \x1b[31m✗ Failed to parse args for ${toolName}\x1b[0m`);
+          }
         }
 
         // Show what's happening
@@ -602,6 +686,9 @@ async function runAgentLoop(userMessage, config) {
 
         const result = await executeTool(toolName, toolArgs);
         const toolMs = Date.now() - toolStart2;
+
+        // Record trace step
+        traceRecorder.recordToolCall(toolName, toolArgs, result.result || result.error || '', toolMs);
 
         // Show result indicators
         if (result.error) {
@@ -632,13 +719,35 @@ async function runAgentLoop(userMessage, config) {
         });
 
         // ── IMPROVEMENT LOOP: auto-validate writes and feed errors back ──
+        // Uses MarrowScript-compiled bounded loop for iteration control + tracing
         if ((toolName === 'write_file' || toolName === 'patch') && !result.error) {
           const filePath = toolArgs.path;
+
+          // Feature 6: self-critique the edit before running lint
+          try {
+            if (validateEditCompiled && filePath) {
+              const fs = require('fs');
+              const path = require('path');
+              const written = fs.existsSync(path.resolve(process.cwd(), filePath))
+                ? fs.readFileSync(path.resolve(process.cwd(), filePath), 'utf-8')
+                : (toolArgs.content || '');
+              const critique = await validateEditCompiled(filePath, written, userMessage);
+              if (!critique.ok && critique.issues.length > 0) {
+                if (_fullscreenRef) _fullscreenRef.addTool('critique', 'err', critique.issues[0].slice(0, 80));
+                // Inject semantic issue as additional context for the improvement loop
+                conversationHistory.push({ role: 'user', content: `[SEMANTIC-REVIEW] Potential issue in ${filePath}: ${critique.issues[0]}` });
+              }
+            }
+          } catch {} // Never block on self-critique
+
           const validation = runValidation(filePath);
           if (validation && !validation.passed) {
             // Track how many times we've tried fixing this file
             if (!improvementAttempts[filePath]) improvementAttempts[filePath] = 0;
             improvementAttempts[filePath]++;
+
+            // Token monitor: record validation failure (counts as improvement overhead)
+            tokenMonitor.recordCompaction(); // Reuse compaction counter for improvement overhead tracking
 
             if (improvementAttempts[filePath] <= MAX_IMPROVE_ITERATIONS) {
               const attempt = improvementAttempts[filePath];
@@ -956,6 +1065,9 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       }
     }
   }
+
+  // Stop trace recording for this turn
+  traceRecorder.stop();
 }
 
 // ─── Validation for Improvement Loop ────────────────────────────────────────
@@ -1162,7 +1274,7 @@ async function chatCompletion(config, messages) {
     const body = {
       model: config.model.name,
       messages: [systemMsg, ...processedMessages],
-      tools: getAllTools(config),
+      tools: getAllTools(config, currentToolCategory),
       temperature: 0.1,
       max_tokens: 4096,
     };
@@ -1217,6 +1329,11 @@ async function chatCompletion(config, messages) {
     }
     if (data?.usage) {
       tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
+      traceRecorder.recordTokens(data.usage.prompt_tokens, data.usage.completion_tokens);
+      // Feature 3: charge token budget
+      if (chargeBudget) {
+        try { chargeBudget('run_turn', { tokens: (data.usage.prompt_tokens || 0) + (data.usage.completion_tokens || 0) }); } catch {}
+      }
     }
 
     // Auto-save session periodically
@@ -1624,6 +1741,21 @@ async function main() {
   if (flags.init) {
     require('./init');
     return;
+  }
+
+  // Eval mode: run prompt evaluation suites
+  if (flags.eval) {
+    const { EvalRunner } = require('./eval_runner');
+    const evalRunner = new EvalRunner(config);
+    console.log(`\n  Running evaluation: ${flags.eval}\n`);
+    const results = await evalRunner.run(flags.eval, { chatCompletionFn: chatCompletion });
+    if (results.error) {
+      console.log(`  \x1b[31m✗ ${results.error}\x1b[0m`);
+    } else {
+      console.log(EvalRunner.format(results));
+      console.log('');
+    }
+    process.exit(results.error ? 1 : 0);
   }
 
   if (flags.acp) {
