@@ -1,6 +1,6 @@
 {
   "name": "smallcode",
-  "version": "0.4.12",
+  "version": "0.4.13",
   "description": "AI coding agent optimized for small LLMs (≤20B parameters)",
   "bin": {
     "smallcode": "bin/smallcode.js"
@@ -14,11 +14,13 @@
   },
   "dependencies": {
     "bonescript-compiler": "0.14.0",
-    "budget-aware-mcp": "0.6.1",
     "chalk": "4.1.2",
     "cli-highlight": "2.1.11",
     "marked": "15.0.12",
-    "marked-terminal": "7.3.0",
+    "marked-terminal": "7.3.0"
+  },
+  "optionalDependencies": {
+    "budget-aware-mcp": "0.6.1",
     "playwright-extra": "4.3.0",
     "puppeteer-extra-plugin-stealth": "2.11.0"
   },

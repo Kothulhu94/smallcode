@@ -42,6 +42,11 @@ SmallCode includes [BoneScript](https://github.com/Doorman11991/BoneScript) and 
 - Node.js 18+
 - A local LLM server (LM Studio, Ollama, or any OpenAI-compatible endpoint)
 
+**Optional** (for code graph + memory features):
+- Python 3 + C/C++ build tools (`build-essential` on Ubuntu, `base-devel` on Arch)
+- These are needed by `better-sqlite3` (used by budget-aware-mcp for code intelligence)
+- SmallCode works fine without them — it falls back to JSON-based memory
+
 ### Configuration
 
 Create a `.env` file in your project root:

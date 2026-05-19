@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.13] - 2026-05-18
+
+### Fixed
+- **Install no longer requires C++ build tools** — `budget-aware-mcp` (which needs `better-sqlite3` native compilation) moved to `optionalDependencies`. Install succeeds even without Python/gcc/make. SmallCode gracefully falls back to JSON-based memory when SQLite isn't available.
+- **Playwright also made optional** — Web browsing (disabled by default anyway) won't block install on systems without Chromium deps.
+- **Top-level require crash** — The `require('budget-aware-mcp')` was outside try/catch, crashing on startup if the module failed to install. Now wrapped with graceful fallback.
+
+### Changed
+- Updated README with accurate optional requirements for code graph features.
+
 ## [0.4.12] - 2026-05-18
 
 ### Fixed

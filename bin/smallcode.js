@@ -45,7 +45,12 @@ const readline = require('readline');
 const os = require('os');
 const tui = require('./tui');
 const chalk = tui.chalk;
-const { MemoryStore: McpMemoryStore } = require('budget-aware-mcp/dist/memory/store.js');
+let McpMemoryStore;
+try {
+  McpMemoryStore = require('budget-aware-mcp/dist/memory/store.js').MemoryStore;
+} catch {
+  McpMemoryStore = null;
+}
 const { ToolScorer, checkAndEnforceHardFail, classifyTask } = require('./governor');
 const { EscalationEngine } = require('./escalation');
 const { PluginLoader } = require('../src/plugins/loader');
@@ -57,10 +62,14 @@ const { UndoStack } = require('../src/session/undo');
 const { shouldInjectGitContext, getGitDiffContext } = require('../src/session/git_context');
 const { routeModel } = require('../src/model/router');
 
-// Initialize structured memory (budget-aware-mcp's SQLite + FTS5 store)
+// Initialize structured memory (budget-aware-mcp's SQLite + FTS5 store, falls back to JSON)
 let memoryStore;
 try {
-  memoryStore = new McpMemoryStore(process.cwd());
+  if (McpMemoryStore) {
+    memoryStore = new McpMemoryStore(process.cwd());
+  } else {
+    throw new Error('budget-aware-mcp not available');
+  }
 } catch {
   const { MemoryStore } = require('./memory');
   memoryStore = new MemoryStore(process.cwd());
@@ -84,7 +93,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.4.12';
+const VERSION = '0.4.13';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
