@@ -66,6 +66,54 @@ async function compressHistoryCompiled(history, maxTokens = 500) {
 }
 
 /**
+ * Route a task to a model tier based on complexity.
+ * Uses the compiled MarrowScript coding_router which deterministically
+ * selects TinyClassifier (≤0.3), SmallCoder (≤0.6), or MediumCoder (default).
+ *
+ * @param {number} complexity - 0.0 to 1.0 complexity estimate
+ * @returns {object|null} { model_id, tier, model } or null if router unavailable
+ */
+function routeToTier(complexity) {
+  const cognition = _getCognition();
+  if (!cognition) return null;
+  try {
+    const router = cognition.getRouter ? cognition.getRouter('coding_router') : null;
+    if (!router) return null;
+    return router.route({ complexity: typeof complexity === 'number' ? complexity : 0.5 });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Estimate task complexity from a user message (0.0 = trivial, 1.0 = highly complex).
+ * Replaces the hand-rolled estimateComplexity in src/model/router.js.
+ */
+function estimateComplexity(message) {
+  if (!message || typeof message !== 'string') return 0.5;
+  const msg = message.toLowerCase();
+  const len = msg.length;
+
+  const strongPatterns = [
+    /\b(refactor|redesign|architect|rewrite|migrate|convert)\b/,
+    /\b(multi.?file|multiple files|across files|all files)\b/,
+    /\b(system|framework|infrastructure|full.?stack)\b/,
+    /\b(test suite|integration test|e2e)\b/,
+    /\b(and then|step \d|first.*then.*finally)\b/,
+  ];
+  if (strongPatterns.some(p => p.test(msg)) || len > 500) return 0.8;
+
+  const fastPatterns = [
+    /\b(fix typo|rename|add comment|format|lint)\b/,
+    /\b(what is|explain|show me|read)\b/,
+    /\b(simple|quick|small|minor)\b/,
+  ];
+  if (fastPatterns.some(p => p.test(msg)) && len < 100) return 0.2;
+
+  return 0.5;
+}
+
+/**
  * Whether the compiled cognition layer is available.
  */
 function isCompiledCognitionAvailable() {
@@ -75,5 +123,7 @@ function isCompiledCognitionAvailable() {
 module.exports = {
   classifyTaskCompiled,
   compressHistoryCompiled,
+  routeToTier,
+  estimateComplexity,
   isCompiledCognitionAvailable,
 };

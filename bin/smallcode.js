@@ -446,11 +446,37 @@ async function runAgentLoop(userMessage, config) {
   }
 
   // Multi-model routing: pick model based on task complexity (if configured)
-  if (config.models) {
-    const selectedModel = routeModel(userMessage, config);
-    if (selectedModel !== config.model.name) {
+  // Phase C: Marrowscript-compiled coding_router for tier-based dispatch.
+  // Falls back to hand-rolled routeModel() if compiled router unavailable.
+  if (config.models || process.env.SMALLCODE_USE_TIER_ROUTING === 'true') {
+    let selectedModel = null;
+    let selectedTier = null;
+    try {
+      const { routeToTier, estimateComplexity, isCompiledCognitionAvailable } = require('./cognition_adapter');
+      if (isCompiledCognitionAvailable()) {
+        const complexity = estimateComplexity(userMessage);
+        const route = routeToTier(complexity);
+        if (route) {
+          // Map model_id back to actual model name from config.models if set,
+          // otherwise use the SMALLCODE_MODEL env var (already configured per tier).
+          if (config.models) {
+            if (route.tier === 'trivial') selectedModel = config.models.fast;
+            else if (route.tier === 'simple') selectedModel = config.models.default;
+            else selectedModel = config.models.strong;
+          }
+          selectedTier = route.tier;
+        }
+      }
+    } catch {}
+
+    // Fallback: hand-rolled routeModel
+    if (!selectedModel && config.models) {
+      selectedModel = routeModel(userMessage, config);
+    }
+
+    if (selectedModel && selectedModel !== config.model.name) {
       config.model.name = selectedModel;
-      if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `→ ${selectedModel}`);
+      if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `→ ${selectedModel}${selectedTier ? ' (' + selectedTier + ')' : ''}`);
     }
   }
 
@@ -462,21 +488,58 @@ async function runAgentLoop(userMessage, config) {
   const maxContextTokens = (config.context?.detected_window || 128000) * ((config.context?.max_budget_pct || 70) / 100);
 
   if (estimatedTokens > maxContextTokens || conversationHistory.length > 30) {
-    // Trim oldest messages but preserve system/skill injections
-    while (conversationHistory.length > 6) {
-      const currentEst = conversationHistory.reduce((sum, m) => {
-        const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-        return sum + Math.ceil(c.length / 4);
-      }, 0);
-      if (currentEst < maxContextTokens * 0.7 && conversationHistory.length <= 20) break;
-      // Find first non-system message to remove (preserve skills/plugins)
-      const removeIdx = conversationHistory.findIndex(m => m.role !== 'system');
-      if (removeIdx === -1) break; // All system messages — can't trim further
-      conversationHistory.splice(removeIdx, 1);
+    // Phase B: Try MarrowScript-compiled compress_history first.
+    // It produces a semantic summary instead of just dropping messages.
+    let compressedSuccessfully = false;
+    if (conversationHistory.length > 10) {
+      try {
+        const { compressHistoryCompiled, isCompiledCognitionAvailable } = require('./cognition_adapter');
+        if (isCompiledCognitionAvailable()) {
+          // Take oldest non-system messages, leave most recent 6 intact
+          const recentCount = 6;
+          const oldStart = conversationHistory.findIndex(m => m.role !== 'system');
+          const oldEnd = conversationHistory.length - recentCount;
+          if (oldStart >= 0 && oldEnd > oldStart) {
+            const oldMessages = conversationHistory.slice(oldStart, oldEnd);
+            const oldSerialized = oldMessages
+              .map(m => {
+                const role = m.role || 'unknown';
+                const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+                return `[${role}] ${content.slice(0, 1500)}`;
+              })
+              .join('\n\n');
+            const targetTokens = Math.max(200, Math.floor(maxContextTokens * 0.1));
+            const summary = await compressHistoryCompiled(oldSerialized, targetTokens);
+            if (summary && summary.length > 0) {
+              // Replace old messages with a single summary system message
+              conversationHistory.splice(oldStart, oldEnd - oldStart, {
+                role: 'system',
+                content: `[Compressed summary of ${oldMessages.length} earlier messages]\n${summary}`,
+              });
+              compressedSuccessfully = true;
+              console.log(tui.compacted(conversationHistory.length));
+            }
+          }
+        }
+      } catch {}
     }
-    const summary = `[Context compacted to fit ${Math.round(maxContextTokens)} token budget]`;
-    conversationHistory.unshift({ role: 'system', content: summary });
-    console.log(tui.compacted(conversationHistory.length));
+
+    // Fallback: drop oldest non-system messages until under budget
+    if (!compressedSuccessfully) {
+      while (conversationHistory.length > 6) {
+        const currentEst = conversationHistory.reduce((sum, m) => {
+          const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+          return sum + Math.ceil(c.length / 4);
+        }, 0);
+        if (currentEst < maxContextTokens * 0.7 && conversationHistory.length <= 20) break;
+        const removeIdx = conversationHistory.findIndex(m => m.role !== 'system');
+        if (removeIdx === -1) break;
+        conversationHistory.splice(removeIdx, 1);
+      }
+      const summary = `[Context compacted to fit ${Math.round(maxContextTokens)} token budget]`;
+      conversationHistory.unshift({ role: 'system', content: summary });
+      console.log(tui.compacted(conversationHistory.length));
+    }
   }
 
   let toolCallsThisTurn = 0;

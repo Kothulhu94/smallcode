@@ -230,6 +230,38 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         return;
       }
 
+      case '/cognition': {
+        // Phase A-D: Show MarrowScript-compiled cognition layer status
+        let cognition = null;
+        try { cognition = require('../src/compiled/cognition'); } catch {}
+        if (!cognition) {
+          console.log(chalk.gray('  Cognition layer: not loaded'));
+          console.log(chalk.gray('  (compile marrow/smallcode_cognition.marrow → src/compiled/)'));
+          console.log('');
+          rl.prompt();
+          return;
+        }
+        console.log(chalk.bold('  MarrowScript Cognition Layer'));
+        console.log(`  Status:    ${chalk.green('● loaded')}`);
+        try {
+          const models = cognition.listModelNames ? cognition.listModelNames() : [];
+          console.log(`  Models:    ${chalk.cyan(models.join(', ') || '(none)')}`);
+        } catch {}
+        try {
+          const prompts = Object.keys(cognition.PROMPTS || {});
+          console.log(`  Prompts:   ${chalk.cyan(prompts.join(', ') || '(none)')}`);
+        } catch {}
+        try {
+          const routers = Object.keys(cognition.ROUTERS || {});
+          console.log(`  Routers:   ${chalk.cyan(routers.join(', ') || '(none)')}`);
+        } catch {}
+        console.log(`  Logs:      ${process.env.SMALLCODE_COGNITION_LOG ? chalk.green('on (' + process.env.SMALLCODE_COGNITION_LOG + ')') : chalk.gray('off (set SMALLCODE_COGNITION_LOG=stdout to enable)')}`);
+        console.log(chalk.gray('  Source:    marrow/smallcode_cognition.marrow'));
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
       case '/mcp': {
         const { MCPClient } = require('../src/tools/mcp_client');
         const client = new MCPClient(process.cwd());
@@ -573,6 +605,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/compact')}       ${chalk.gray('Trim conversation history')}`);
         console.log(`  ${chalk.cyan('/escalation')}    ${chalk.gray('View model escalation status')}`);
         console.log(`  ${chalk.cyan('/profile')}       ${chalk.gray('Show detected model profile')}`);
+        console.log(`  ${chalk.cyan('/cognition')}     ${chalk.gray('Show MarrowScript cognition layer status')}`);
         console.log(`  ${chalk.cyan('/mcp')}           ${chalk.gray('Show connected MCP servers')}`);
         console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
         console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);
