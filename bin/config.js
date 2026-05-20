@@ -80,6 +80,7 @@ function loadConfig(flags = {}) {
   // CLI flags override everything
   if (flags.model) config.model.name = flags.model;
   if (flags.provider) config.model.provider = flags.provider;
+  if (flags.endpoint || flags.baseUrl) config.model.baseUrl = flags.endpoint || flags.baseUrl;
   if (flags.classic) config.tui.classic = true;
 
   return config;

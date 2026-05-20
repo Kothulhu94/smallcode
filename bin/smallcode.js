@@ -150,6 +150,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '--classic') flags.classic = true;
   else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
   else if (arg === '-p' || arg === '--provider') { flags.provider = args[++i]; }
+  else if (arg === '--endpoint' || arg === '--base-url') { flags.endpoint = args[++i]; }
   else if (arg === '-P' || arg === '--prompt') { flags.prompt = args[++i]; }
   else if (arg === '--eval') { flags.eval = args[++i] || 'classify_accuracy'; }
   else if (arg === '--trace') { flags.trace = args[++i]; }
@@ -174,6 +175,7 @@ OPTIONS:
   -V, --verbose           Verbose output (show tool I/O)
   -m, --model <NAME>      Model to use (default: qwen2.5-coder:14b)
   -p, --provider <NAME>   Provider (ollama, openai, anthropic, llamacpp)
+  --endpoint <URL>        OpenAI-compatible endpoint/base URL
   -P, --prompt <TEXT>     Run a single prompt non-interactively
   -r, --resume            Resume last active session
   --non-interactive       Run single prompt, no TUI
