@@ -5,7 +5,7 @@
 # and installs it locally. No npm / node-gyp build tools needed.
 #
 # Usage (run as normal user, not admin):
-#   irm https://raw.githubusercontent.com/Zireael/smallcode/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Doorman11991/smallcode/master/install.ps1 | iex
 #
 # Environment variables (all optional):
 #   SMALLCODE_HOME   Install directory  (default: ~\.smallcode)

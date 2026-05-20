@@ -8,10 +8,10 @@ name: Build and Release
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [master]
 
 # Force JavaScript actions to run on Node.js 24 to avoid deprecation warnings.
 # Node.js 20 actions are deprecated and will be removed September 16th, 2026.
