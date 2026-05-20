@@ -77,6 +77,12 @@ SMALLCODE_BASE_URL=http://localhost:1234/v1
 # DEEPSEEK_API_KEY=sk-...
 ```
 
+You can override the endpoint for one run with:
+
+```bash
+smallcode --endpoint http://localhost:1234/v1 --model your-model-name
+```
+
 See `.env.example` for all options. Also supports `smallcode.toml` for backwards compatibility.
 
 ## Architecture
