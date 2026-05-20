@@ -96,6 +96,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: smallcode-*
@@ -104,6 +106,25 @@ jobs:
       - name: List release assets
         run: ls -lh smallcode-*.tar.gz
 
+      - name: Extract changelog section for this version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          cat > .github/_extract.awk << 'AWKEOF'
+          BEGIN { found = 0 }
+          {
+            # Match ## [X.X.X] or ## [X.X.X-preview] style headers
+            if (match($0, /^## \[([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?)\]/, m)) {
+              if (found) exit
+              if (m[1] == ver) { found = 1; print; next }
+            }
+            found { print }
+          }
+          AWKEOF
+          awk -v ver="$VERSION" -f .github/_extract.awk CHANGELOG.md > _release_body.md || true
+          echo "Extracted $(wc -c < _release_body.md) bytes for version $VERSION"
+
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: _release_body.md
           files: smallcode-*.tar.gz
