@@ -4,7 +4,7 @@
 # Downloads the platform-specific portable tarball from GitHub Releases
 # and installs it locally. No npm / node-gyp build tools needed.
 #
-# Usage:  bash <(curl -fsSL https://raw.githubusercontent.com/Zireael/smallcode/main/install.sh)
+# Usage:  bash <(curl -fsSL https://raw.githubusercontent.com/Doorman11991/smallcode/master/install.sh)
 #
 # Environment variables (all optional):
 #   SMALLCODE_HOME   Install directory  (default: ~/.smallcode)
@@ -29,7 +29,7 @@ esac
 
 case "${ARCH}" in
   x86_64|amd64)  ARCH_TAG="X64"   ;;
-  aarch64|arm64) ARCH_TAG="Arm64" ;;
+  aarch64|arm64) ARCH_TAG="ARM64" ;;
   *)             echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
 esac
 
