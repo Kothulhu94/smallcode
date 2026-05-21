@@ -336,7 +336,7 @@ class FullScreenTUI {
 
     // Version below logo
     const versionRow = startRow + logoLines.length + 1;
-    const versionText = `v0.2.0`;
+    const versionText = `v${require('../../package.json').version}`;
     const versionPad = Math.max(0, Math.floor((w - logoWidth) / 2) + logoWidth - versionText.length);
     buf += ANSI.moveTo(versionRow, versionPad + 1);
     buf += t.muted + versionText + ANSI.reset;
@@ -839,6 +839,15 @@ class FullScreenTUI {
     this.chatLines.push(''); // spacer
     this.chatScroll = 0; // snap to bottom
     this.msgCount++;
+
+    // Cap chatLines to prevent unbounded growth (keep last 5000 lines).
+    // A very long session with verbose tool output can accumulate tens of
+    // thousands of lines; rendering stays fast by only keeping recent history.
+    const MAX_CHAT_LINES = 5000;
+    if (this.chatLines.length > MAX_CHAT_LINES) {
+      this.chatLines.splice(0, this.chatLines.length - MAX_CHAT_LINES);
+    }
+
     this.render();
   }
 

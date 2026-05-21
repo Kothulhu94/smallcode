@@ -230,19 +230,21 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
       }
 
       case '/git': {
-        const gitCmd = parts.slice(1).join(' ');
-        if (!gitCmd) {
+        const gitArgs = parts.slice(1);
+        if (gitArgs.length === 0) {
           console.log(chalk.gray('  /git status │ /git log │ /git diff │ /git commit -m "msg"'));
           console.log('');
           rl.prompt();
           return;
         }
-        const { execSync } = require('child_process');
+        // Use execFileSync with arg array to prevent shell injection.
+        // /git status; rm -rf / would previously execute the rm command.
+        const { execFileSync } = require('child_process');
         try {
-          const output = execSync(`git ${gitCmd}`, { encoding: 'utf-8', cwd: process.cwd(), timeout: 10000 });
+          const output = execFileSync('git', gitArgs, { encoding: 'utf-8', cwd: process.cwd(), timeout: 10000 });
           console.log(output);
         } catch (e) {
-          console.log(chalk.red(`  ${e.stdout || e.stderr || e.message}`));
+          console.log(chalk.red(`  ${(e.stdout || '') + (e.stderr || e.message || '')}`));
         }
         rl.prompt();
         return;
@@ -497,17 +499,23 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
             console.log(chalk.gray('  Example: /plugin install smallcode-plugin-lint'));
             console.log(chalk.gray('  Example: /plugin install github:user/repo'));
           } else {
-            const { execSync } = require('child_process');
+            const { execFileSync } = require('child_process');
             const pluginsDir = require('path').join(process.cwd(), '.smallcode', 'plugins');
             const fs = require('fs');
             if (!fs.existsSync(pluginsDir)) fs.mkdirSync(pluginsDir, { recursive: true });
-            console.log(chalk.gray(`  Installing ${pkg}...`));
-            try {
-              execSync(`npm install --prefix "${pluginsDir}" ${pkg}`, { encoding: 'utf-8', timeout: 60000, cwd: process.cwd() });
-              console.log(chalk.green(`  ✓ Installed ${pkg}`));
-              console.log(chalk.gray('  Restart SmallCode to activate.'));
-            } catch (e) {
-              console.log(chalk.red(`  ✗ Install failed: ${(e.stderr || e.message || '').slice(0, 200)}`));
+            // Validate package name — only allow npm-safe characters to prevent injection.
+            // Legitimate names: @scope/pkg, pkg-name, github:user/repo
+            if (!/^[@a-zA-Z0-9._\-/: ]+$/.test(pkg)) {
+              console.log(chalk.red(`  ✗ Invalid package name: ${pkg}`));
+            } else {
+              console.log(chalk.gray(`  Installing ${pkg}...`));
+              try {
+                execFileSync('npm', ['install', '--prefix', pluginsDir, pkg], { encoding: 'utf-8', timeout: 60000, cwd: process.cwd() });
+                console.log(chalk.green(`  ✓ Installed ${pkg}`));
+                console.log(chalk.gray('  Restart SmallCode to activate.'));
+              } catch (e) {
+                console.log(chalk.red(`  ✗ Install failed: ${((e.stderr || '') + (e.message || '')).slice(0, 200)}`));
+              }
             }
           }
         } else if (sub === 'remove') {

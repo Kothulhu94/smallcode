@@ -105,6 +105,7 @@ bin/
 
 src/
 ├── api/index.js        Programmatic API (require('smallcode'))
+├── security/sanitize.js Centralized redaction, path safety, shell escaping
 ├── tui/fullscreen.js   Fullscreen alternate-buffer TUI
 ├── plugins/loader.js   Plugin system
 ├── plugins/skills.js   Skill system
@@ -113,6 +114,31 @@ src/
 ├── model/              Multi-model profiles + routing
 └── session/            Persistence, undo, sharing, references
 ```
+
+## Security & Context-Leak Hardening
+
+SmallCode runs untrusted-ish input — model output, MCP server output, tool
+results, web pages — back into a context window. The `src/security/sanitize.js`
+module is the single chokepoint for keeping that traffic safe:
+
+- **Secret redaction** before disk persistence and before injection into the
+  model context. Patterns cover OpenAI/Anthropic/GitHub/Google/AWS keys, JWTs,
+  bearer tokens, env-style `KEY=value`, and PEM private key blocks. Sessions,
+  traces, and shared exports all flow through it.
+- **Path containment** — `@file` references, image attachments, and every
+  file-touching tool refuse traversal (`../`), absolute paths, and sensitive
+  paths (`.ssh/`, `.aws/credentials`, `/etc/shadow`, etc.).
+- **Shell escaping** — All tool-built commands use `escapeShellArg` /
+  `execFileSync` with arg arrays. Model-supplied patterns and paths can no
+  longer escape `"…"` interpolation.
+- **SSRF guard** — Endpoint allowlist matches by `URL.origin`, not naive
+  `startsWith`. Cloud metadata (`169.254.169.254`, `metadata.google.internal`),
+  link-local (`169.254/16`), and CGNAT (`100.64/10`) are always blocked,
+  even when `LLM_ALLOW_PUBLIC_ENDPOINTS=1`. `web_fetch` uses
+  `redirect: 'manual'` so a 30x can't bypass the guard.
+- **MCP env scrubbing** — Spawned MCP servers don't inherit
+  `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `AWS_SECRET_ACCESS_KEY` etc.
+  unless the server's config explicitly re-exports them.
 
 ## Key Features
 

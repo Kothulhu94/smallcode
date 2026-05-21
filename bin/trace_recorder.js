@@ -5,6 +5,10 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { redactValue, redactString } = require('../src/security/sanitize');
+
+const FILE_MODE = 0o600;
+const DIR_MODE = 0o700;
 
 class TraceRecorder {
   constructor(workdir) {
@@ -35,11 +39,18 @@ class TraceRecorder {
    */
   recordToolCall(name, args, result, durationMs) {
     if (!this.recording || !this.current) return;
+    // Redact args + result before persisting. Tool args from the model can
+    // include literal API keys (e.g. when user pastes an env var into the
+    // prompt) and tool results often contain file content with secrets.
+    const safeArgs = redactValue(args);
+    const safeResult = typeof result === 'string'
+      ? redactString(result).slice(0, 2000)
+      : JSON.stringify(redactValue(result)).slice(0, 2000);
     this.current.steps.push({
       type: 'tool_call',
       name,
-      args,
-      result: typeof result === 'string' ? result.slice(0, 2000) : JSON.stringify(result).slice(0, 2000),
+      args: safeArgs,
+      result: safeResult,
       durationMs,
       timestamp: Date.now(),
     });
@@ -52,8 +63,13 @@ class TraceRecorder {
     if (!this.recording || !this.current) return;
     this.current.steps.push({
       type: 'model_response',
-      content: content ? content.slice(0, 1000) : null,
-      toolCalls: toolCalls ? toolCalls.map(tc => ({ name: tc.function.name, args: tc.function.arguments })) : null,
+      content: content ? redactString(content).slice(0, 1000) : null,
+      toolCalls: toolCalls ? toolCalls.map(tc => ({
+        name: tc.function.name,
+        args: typeof tc.function.arguments === 'string'
+          ? redactString(tc.function.arguments)
+          : JSON.stringify(redactValue(tc.function.arguments || {})),
+      })) : null,
       timestamp: Date.now(),
     });
   }
@@ -88,12 +104,23 @@ class TraceRecorder {
     if (!this.recording || !this.current) return null;
     this.current.endedAt = new Date().toISOString();
     this.current.durationMs = Date.now() - new Date(this.current.startedAt).getTime();
+    // Redact prompt — it can contain pasted secrets, file paths, or
+    // proprietary data the user wouldn't want shared via /share.
+    this.current.prompt = redactString(this.current.prompt || '');
     this.recording = false;
 
     // Save to disk
-    if (!fs.existsSync(this.tracesDir)) fs.mkdirSync(this.tracesDir, { recursive: true });
-    const filePath = path.join(this.tracesDir, `${this.current.id}.json`);
-    fs.writeFileSync(filePath, JSON.stringify(this.current, null, 2));
+    if (!fs.existsSync(this.tracesDir)) fs.mkdirSync(this.tracesDir, { recursive: true, mode: DIR_MODE });
+    // Validate trace ID — defends against accidental injection via stop()
+    // being called with a tampered current object.
+    const id = String(this.current.id || '').replace(/[^A-Za-z0-9_-]/g, '');
+    if (!id) { this.current = null; return null; }
+    const filePath = path.join(this.tracesDir, `${id}.json`);
+    if (!filePath.startsWith(this.tracesDir + path.sep)) { this.current = null; return null; }
+    const tmpPath = filePath + `.tmp.${process.pid}.${Date.now()}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(this.current, null, 2), { mode: FILE_MODE });
+    fs.renameSync(tmpPath, filePath);
+    try { fs.chmodSync(filePath, FILE_MODE); } catch {}
 
     const saved = this.current;
     this.current = null;
@@ -129,7 +156,9 @@ class TraceRecorder {
    * Load a trace by ID.
    */
   load(id) {
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
     const filePath = path.join(this.tracesDir, `${id}.json`);
+    if (!filePath.startsWith(this.tracesDir + path.sep)) return null;
     if (!fs.existsSync(filePath)) return null;
     return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
   }
@@ -172,9 +201,15 @@ class TraceRecorder {
         testLines.push(``);
       } else if (step.name === 'bash') {
         const args = typeof step.args === 'string' ? JSON.parse(step.args) : step.args;
-        testLines.push(`  test('step ${i + 1}: bash "${(args.command || '').slice(0, 40)}"', () => {`);
+        const cmd = String(args.command || '');
+        // Use JSON.stringify to escape the command for embedding in a JS
+        // string literal — the prior `'${...}'` interpolation broke whenever
+        // the command contained quotes, backticks, or backslashes, and could
+        // produce invalid (or worse, injectable) test code.
+        const cmdLiteral = JSON.stringify(cmd);
+        testLines.push(`  test('step ${i + 1}: bash ${cmd.slice(0, 40).replace(/['`\\\r\n]/g, ' ')}', () => {`);
         testLines.push(`    // Verify command succeeds`);
-        testLines.push(`    const result = execSync('${(args.command || '').replace(/'/g, "\\'")}', { encoding: 'utf-8', timeout: 15000 });`);
+        testLines.push(`    const result = execSync(${cmdLiteral}, { encoding: 'utf-8', timeout: 15000 });`);
         testLines.push(`    expect(result).toBeDefined();`);
         testLines.push(`  });`);
         testLines.push(``);

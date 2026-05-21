@@ -7,7 +7,7 @@ const { getRoutingMode, getCategorySelectorTool, getToolsForCategory } = require
 // ─── Base Tools ──────────────────────────────────────────────────────────────
 
 const TOOLS = [
-  { type: 'function', function: { name: 'list_projects', description: 'List all indexed projects/repos in the workspace with stats: file count, symbol count, lines of code, languages. Use this FIRST when asked about "the projects", "the codebase", or "what\'s in this workspace".', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'list_projects', description: 'List all indexed projects/repos in the workspace with stats: file count, symbol count, lines of code, languages. Use this FIRST when asked about "the projects", "the codebase", or "what\'s in this workspace".', parameters: { type: 'object', properties: {}, required: [] } } },
   { type: 'function', function: { name: 'graph_search', description: 'Search the code graph for a symbol, function, or class name. Returns connected code with context. Use for "how does X work" or "find the auth logic" — NOT for listing projects.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Symbol name or concept to search for' }, max_tokens: { type: 'integer', description: 'Max tokens to return (default 4000)' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'explain_symbol', description: 'Get full explanation of a symbol: signature, location, callers, callees, and where it fits in the architecture. Use for "what does X do" questions.', parameters: { type: 'object', properties: { symbol: { type: 'string', description: 'Symbol name to explain' } }, required: ['symbol'] } } },
   { type: 'function', function: { name: 'memory_load', description: 'Load relevant project memory for a task. Returns past decisions, workflows, conventions, and gotchas. Call this before starting complex work.', parameters: { type: 'object', properties: { task: { type: 'string', description: 'Task description to find relevant context for' } }, required: ['task'] } } },
@@ -20,6 +20,10 @@ const TOOLS = [
   { type: 'function', function: { name: 'memory_remember', description: 'Save durable knowledge to project memory. Only save facts that should persist: decisions, workflows, gotchas, conventions. NOT task transcripts.', parameters: { type: 'object', properties: { type: { type: 'string', enum: ['decision', 'workflow', 'gotcha', 'convention', 'context'], description: 'Knowledge type' }, title: { type: 'string', description: 'Short title' }, content: { type: 'string', description: 'The knowledge' }, tags: { type: 'array', items: { type: 'string' }, description: 'Tags' } }, required: ['type', 'title', 'content'] } } },
   { type: 'function', function: { name: 'bone_compile', description: 'Compile a .bone file into a complete Node.js/TypeScript backend. Creates routes, models, auth, events, migrations, SDK, admin panel, Docker, and CI from a single declarative file.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path to the .bone file' }, target: { type: 'string', description: 'Target: express (default), nakama, prisma, sqlite' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'bone_check', description: 'Validate a .bone file without generating code. Reports type errors and constraint violations. Use this before bone_compile to catch issues early.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path to the .bone file to validate' } }, required: ['path'] } } },
+  { type: 'function', function: { name: 'web_search', description: 'Search the internet for information. Requires SMALLCODE_WEB_BROWSE=true.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Search query' } }, required: ['query'] } } },
+  { type: 'function', function: { name: 'web_fetch', description: 'Fetch and extract readable text content from a URL. Requires SMALLCODE_WEB_BROWSE=true.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'URL to fetch' } }, required: ['url'] } } },
+  { type: 'function', function: { name: 'memory_list', description: 'List all stored memory objects. Optionally filter by type.', parameters: { type: 'object', properties: { type: { type: 'string', description: 'Filter by type: decision, workflow, gotcha, convention, context (optional)' } }, required: [] } } },
+  { type: 'function', function: { name: 'memory_forget', description: 'Delete a memory object by ID.', parameters: { type: 'object', properties: { id: { type: 'string', description: 'Memory object ID to delete' } }, required: ['id'] } } },
 ];
 
 // ─── Compound Tools ──────────────────────────────────────────────────────────
@@ -68,8 +72,18 @@ function getAllTools(config, stage2Category, deps = {}) {
   const routingOverride = process.env.SMALLCODE_TOOL_ROUTING;
   const mode = getRoutingMode(contextWindow, routingOverride);
 
+  // Fix #13: On very small context models (<16k), limit tool count to save tokens.
+  // Full tool schemas for 14+ tools is ~2000 tokens — 25% of an 8k context window.
+  if (contextWindow <= 16384 && mode === 'two_stage' && !stage2Category) {
+    // In 2-stage mode with no category yet: return ONLY the category selector.
+    // Don't also append all tools (the old code did both, which is worse than either alone).
+    return [getCategorySelectorTool()];
+  }
+
   if (mode === 'two_stage' && !stage2Category) {
-    return [getCategorySelectorTool(), ...allTools];
+    // Fix #20: Don't include allTools alongside the selector. The point of 2-stage
+    // is to NOT send all tools upfront. Return only the selector.
+    return [getCategorySelectorTool()];
   }
 
   if (mode === 'two_stage' && stage2Category) {

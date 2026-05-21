@@ -1,5 +1,195 @@
 # Changelog
 
+## [0.6.15] - 2026-05-20
+
+### Security
+Audit pass focused on context-leak-through-tooling. 21 issues fixed across the
+session, tools, MCP, and provider layers.
+
+### Tool Schema & Definition Fixes (Round 3)
+- **`src/compiled/tool_router.js`** — `search` and `plan` categories referenced
+  phantom tool name `'grep'` (actual name is `'search'`). All categories now
+  map to correct tool names, include compound tools, and cover `explain_symbol`,
+  `memory_load`, `memory_remember`, `bone_compile`, `bone_check`.
+- **`bin/tools.js`** — Added missing tool definitions for `web_search`,
+  `web_fetch`, `memory_list`, `memory_forget`. These had executor support but
+  no schema — the model could never call them. Added `required: []` to
+  `list_projects` (some servers reject missing `required` field).
+- **MCP server mode** (`handleMCPToolCall`) — Fixed path traversal in
+  `smallcode_read_file` and `smallcode_patch` (used raw `path.resolve` with no
+  containment). Fixed shell injection in `smallcode_search` (interpolated
+  pattern into shell string). Fixed `smallcode_bash` (no blocklist). Fixed
+  `smallcode_memory_load` crash (destructured `{objects}` from a plain array).
+  Fixed `smallcode_memory_remember` calling wrong `memoryStore.remember` API.
+  All now use `safeResolvePath` + `escapeShellArg` + `sanitizeToolOutput`.
+- **MCP server mode** — `runMCP` and `handleMCPRequest` are now async.
+  `smallcode_agent` tool previously returned before the agent loop finished
+  because the handler wasn't awaited. Now awaits properly.
+- **Duplicate `runValidation`** — Removed the 80-line inline version in
+  `smallcode.js` (which still used shell-interpolated paths) and replaced with
+  a one-liner delegating to `model_client.js`'s hardened `execFileSync` version.
+- **`bin/executor.js` `memory_load`/`memory_remember`** — Now handles both the
+  budget-aware-mcp API (object arg, `{objects}` return) and the fallback
+  `MemoryStore` (positional args, array return) without crashing.
+- **`src/lsp/client.js`** — `getDiagnostics` now sends `textDocument/didClose`
+  after reading diagnostics so the language server doesn't hold every validated
+  file in memory forever. Prevents TS server OOM on long sessions.
+- **`src/tools/builtin/web_browse.js`** — Added `process.on('exit'/'SIGINT'/'SIGTERM')`
+  handlers that close the Playwright browser instance. Previously leaked a
+  100-300MB Chromium process for the entire session lifetime.
+- **LSP client cleanup** — Added `_lspClient.stop()` to the TUI close handler
+  (previously the language server process leaked as a zombie on exit).
+- **`bin/governor.js`** — `verificationHistory` now bounded to 50 tracked files.
+  Oldest entries are pruned when the limit is reached. Previously grew without
+  bound across all turns.
+- **Session ID generation** — Old formula `(9999999999999 - Date.now())` would
+  overflow in 2033 producing `NaN` IDs and session collisions. Replaced with
+  `MAX_SAFE_INTEGER - Date.now()` (good until year 2255).
+
+### Context Overflow Fixes (20 bugs)
+- **Mid-turn eviction loop** — `midEst` was a `const` that never decreased; the
+  loop evicted everything or nothing. Now uses `let` and decrements on each eviction.
+- **Mid-turn eviction orphans tool_call_ids** — splicing `role:"tool"` messages
+  breaks the tool_call pairing. Now replaces content with `[evicted: N tokens]`
+  when the assistant message is still present; only splices truly orphaned entries.
+- **Improvement loop injects full file content unbounded** — capped to 15% of
+  context window (max 8000 chars). Escalation prompt also capped to 12000 chars.
+- **`[AUTO-FIX]` bash error injection** — reduced from 1500 to 800 chars per
+  attempt. The full output already lives in the tool result message.
+- **`[SEMANTIC-REVIEW]` never evicted** — no direct fix (these are `role:'user'`)
+  but the combination of tighter compaction triggers and lower thresholds means
+  compaction fires earlier and removes them along with other old messages.
+- **`[DECOMPOSE]` strategy instructions unbounded** — capped indirectly by the
+  tighter compaction trigger (now fires at 80% of budget, not 100%).
+- **Image base64 re-extracted on every `chatCompletion` call** — now only extracts
+  from the most recent user message. Older @image references are treated as plain text.
+- **`formatReferencesForPrompt` no size cap** — capped at 8000 chars (~2000 tokens).
+  Individual files capped at 4000 chars. Excess files noted as truncated.
+- **Git diff `--stat` output unbounded** — capped at 40 lines.
+- **Auto-compact fires only at 30+ messages OR 100% token overflow** — now fires
+  at 80% token usage regardless of message count. Small-context models (8k-16k)
+  need early compaction.
+- **Compression target was 10% of window** — bounded to max 1500 tokens. A 128k
+  model doesn't need a 12,800-token summary.
+- **Tool schemas sent without context awareness** — 2-stage routing now returns
+  ONLY the category selector (not selector + all tools). Small-context models
+  (<16k) always use pure 2-stage.
+- **Assistant tool_calls store full `write_file` content in history** — arguments
+  now truncated to 500 chars in the stored message. The tool result already
+  confirms what was written.
+- **Memory injection with no relevance threshold** — now caps at 3200 chars and
+  scales with context window (3% of detected window).
+- **Auto-commit shell injection via commitMsg** — migrated to `execFileSync` with
+  arg arrays. Special chars in commit messages no longer break the shell.
+- **Plugin prompt injections unbounded** — capped at 2000 chars.
+- **Skill auto-injection unbounded** — capped at 4000 chars.
+- **Fallback compaction stops at 20 messages even if over budget** — removed the
+  `conversationHistory.length <= 20` bail condition.
+- **`currentToolCategory = null` after first tool call** — changed to `'plan'`
+  which gives all tools without also adding the category selector on 2-stage.
+- **2-stage routing returns `[selector, ...allTools]`** — now returns only
+  `[selector]` as originally intended (the whole point of 2-stage is to NOT
+  send all tools upfront).
+
+### Added
+- `src/security/sanitize.js` — Single source of truth for redaction, ANSI
+  stripping, path containment, and shell escaping. ~280 lines, no I/O.
+  - `redactString` / `redactValue` — Strip OpenAI/Anthropic/GitHub/Google/AWS
+    keys, JWTs, bearer tokens, env-style `KEY=value` pairs, and PEM private
+    key blocks. Cycle-safe via `WeakSet`.
+  - `safeResolvePath` — Containment-checked path resolution; refuses
+    traversal, sensitive paths (`.ssh`, `.aws`, `/etc/shadow`, etc.), absolute
+    paths, NUL bytes. Optional `allowHome` / `allowOutside` flags.
+  - `escapeShellArg` / `buildCommand` — Cross-platform safe shell escaping;
+    POSIX single-quote and Windows double-quote-with-doubling. Used to
+    eliminate every `"${userInput}"` interpolation in shell commands.
+  - `stripAnsi` — Comprehensive ANSI/control stripper covering CSI, OSC,
+    DCS, SOS, PM, APC, 8-bit C1, and stray C0 controls. Replaces the
+    previous CSI-only `\x1b\[…[a-zA-Z]` regex which left OSC and 8-bit
+    sequences intact in tool output.
+  - `sanitizeToolOutput` — Combined ANSI strip + secret redaction for any
+    string flowing back into the model's context window.
+  - `createLineDemuxer` — Shared 'data' listener for stdio JSON-RPC clients
+    that demuxes line-by-line into per-request handlers. Replaces the
+    per-request `on('data', …)` pattern in MCP clients.
+
+### Changed (security fixes)
+- **`src/session/persistence.js`** — Sessions now redact secrets before
+  writing to disk, use atomic temp+rename writes, enforce 0o600 file mode
+  and 0o700 dir mode, and validate session IDs against `^[A-Za-z0-9_-]{1,64}$`
+  to block path traversal via crafted IDs (e.g. `load('../../../etc/passwd')`).
+- **`bin/trace_recorder.js`** — Redacts tool args, tool results, model
+  responses, and prompts before persisting. Validates trace IDs. Atomic
+  writes with 0o600 mode. Generated test files use `JSON.stringify` for
+  string literals to prevent injection from crafted commands.
+- **`src/session/references.js`** — `@path` resolution is now containment
+  checked; sensitive paths are silently dropped; file content is sanitized
+  before injection so `@.env` doesn't leak API keys to the model. Files
+  >5MB are refused.
+- **`src/session/images.js`** — Image references are containment-checked
+  and refused over 8MB to prevent base64 context blow-up.
+- **`src/session/share.js`** — Replaced `execSync` shell-string with
+  `execFileSync` array form (the prior code interpolated session title
+  into a shell command — a crafted title could escape the quoting).
+  Temp file moved to OS tmpdir with 0o600 perms. Output redacted.
+- **`src/session/git_context.js`** — Migrated from `execSync` to
+  `execFileSync` with arg arrays. Output sanitized.
+- **`src/tools/mcp_client.js`** — Strips ambient API keys (`OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, etc.) from the env passed to spawned MCP servers
+  unless the server's config explicitly re-exports them. Replaced the
+  per-request `on('data', …)` pattern with a single shared line demuxer
+  (the prior pattern leaked listeners under load and could resolve a
+  request with another request's bytes).
+- **`bin/mcp_bridge.js`** — Same demuxer fix; `shell: false` made explicit
+  on the spawn; demuxer cleaned up on process exit and `killMCP()`.
+- **`src/tools/builtin/web_browse.js`** — `webFetch` validates URLs through
+  the SSRF guard; refuses loopback / RFC1918 by default; uses
+  `redirect: 'manual'` so a 30x to `169.254.169.254` can't bypass the
+  guard. Output sanitized.
+- **`src/compiled/providers/ssrf_guard.js`** — Allowlist matching now uses
+  `URL.origin` rather than naive `startsWith` (the prior approach allowed
+  bypass via prefix-spoof URLs like `https://api.example.com.attacker.com`).
+  Always-blocked list added for cloud metadata, link-local (169.254/16),
+  CGNAT (100.64/10), and 0.0.0.0/8 — even when
+  `LLM_ALLOW_PUBLIC_ENDPOINTS=1`.
+- **`bin/executor.js`** — `read_file` / `write_file` / `patch` /
+  `read_and_patch` / `create_and_run` use `safeResolvePath` instead of
+  raw `path.resolve`. `search` / `find_files` / `graph_search` /
+  `explain_symbol` / `find_and_read` / `search_and_read` use
+  `escapeShellArg` / `buildCommand` instead of `String.replace(/"/g, …)`.
+  All tool output flows through `sanitizeToolOutput`. `bone_compile`
+  validates the `target` arg against an enum allowlist. The `run` tool's
+  timeout error message now reflects the configured timeout instead of
+  hard-coded "30s". `explain_symbol` rejects non-identifier symbols.
+- **`bin/model_client.js`** / **`bin/governor.js`** — `runValidation` and
+  `verifyCode` use `execFileSync` with arg arrays so the file path
+  (which the model controls) cannot inject shell commands. Provider
+  error messages are redacted before logging.
+- **`src/api/index.js`** — `_executeTool` for `read_file`, `write_file`,
+  `patch`, `bash`, `search`, `find_files` migrated to safe path resolution
+  and shell escaping; tool output sanitized; provider errors redacted.
+- **`src/governor/early_stop.js`** — `newTurn()` clears `_patchAttempts`
+  in addition to `patchFailures` (the prior version leaked attempt counts
+  across turns, eventually causing false-positive patch-spiral signals).
+
+### Fixed
+- Tool output containing `\x1b]0;…\x07` (OSC, e.g. terminal title-set from
+  TUIs run inside `bash`) was previously injected into the model's
+  conversation context as raw bytes. Tools now strip OSC, DCS, and 8-bit
+  C1 in addition to CSI.
+- `session_persistence._save` was a non-atomic single `writeFileSync`. A
+  crash mid-save left a half-written session that the next launch couldn't
+  parse and that `list()` then quietly dropped. Atomic temp+rename fixes
+  it.
+- `mcp_client._sendRequest` attached one `on('data', …)` listener per
+  request; under bursty traffic (e.g. tool listing on initialize, then
+  many parallel tool calls), the same chunk was re-parsed by every
+  outstanding listener, occasionally letting one request resolve with
+  another request's bytes. Single demuxer fixes it.
+- `web_fetch` followed redirects automatically. A model could hit a
+  benign-looking URL that 302-redirected to `169.254.169.254/…` and
+  exfiltrate cloud metadata that way. `redirect: 'manual'` blocks it.
+
 ## [0.6.9] - 2026-05-20
 
 ### Added

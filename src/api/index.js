@@ -13,6 +13,12 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { EarlyStopDetector } = require('../governor/early_stop');
 const { getProfile } = require('../model/profiles');
+const {
+  escapeShellArg,
+  buildCommand,
+  safeResolvePath,
+  sanitizeToolOutput,
+} = require('../security/sanitize');
 
 class SmallCode extends EventEmitter {
   constructor(config = {}) {
@@ -192,7 +198,9 @@ Rules:
 
     if (!response.ok) {
       const err = await response.text();
-      throw new Error(`API error ${response.status}: ${err.slice(0, 200)}`);
+      // Redact provider error before throwing — some providers echo the
+      // request back including Authorization headers on 401/403.
+      throw new Error(`API error ${response.status}: ${sanitizeToolOutput(err).slice(0, 200)}`);
     }
 
     return response.json();
@@ -223,18 +231,22 @@ Rules:
 
     switch (name) {
       case 'read_file': {
-        const filePath = path.resolve(cwd, args.path);
+        const safe = safeResolvePath(args.path, cwd);
+        if (!safe.ok) return { error: `read_file rejected: ${safe.reason}` };
+        const filePath = safe.fullPath;
         if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path}` };
         const content = fs.readFileSync(filePath, 'utf-8');
         const lines = content.split('\n');
         const start = (args.start_line || 1) - 1;
         const end = args.end_line || lines.length;
-        const numbered = lines.slice(start, end).map((l, i) => `${String(start + i + 1).padStart(4)}│ ${l}`).join('\n');
+        const numbered = lines.slice(start, end).map((l, i) => `${String(start + i + 1).padStart(4)}│ ${sanitizeToolOutput(l)}`).join('\n');
         return { result: `${args.path} (${lines.length} lines):\n${numbered}` };
       }
 
       case 'write_file': {
-        const filePath = path.resolve(cwd, args.path);
+        const safe = safeResolvePath(args.path, cwd);
+        if (!safe.ok) return { error: `write_file rejected: ${safe.reason}` };
+        const filePath = safe.fullPath;
         const dir = path.dirname(filePath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         const existed = fs.existsSync(filePath);
@@ -244,7 +256,9 @@ Rules:
       }
 
       case 'patch': {
-        const filePath = path.resolve(cwd, args.path);
+        const safe = safeResolvePath(args.path, cwd);
+        if (!safe.ok) return { error: `patch rejected: ${safe.reason}` };
+        const filePath = safe.fullPath;
         if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path}` };
         let content = fs.readFileSync(filePath, 'utf-8');
         const count = content.split(args.old_str).length - 1;
@@ -262,17 +276,18 @@ Rules:
         }
         try {
           const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
-          return { result: output.slice(0, 3000) || '(no output)', command };
+          return { result: sanitizeToolOutput(output).slice(0, 3000) || '(no output)', command };
         } catch (e) {
           const output = (e.stdout || '') + (e.stderr || '');
-          return { result: output.slice(0, 2000) || e.message, error: `Exit code ${e.status || 'unknown'}`, command };
+          return { result: sanitizeToolOutput(output).slice(0, 2000) || sanitizeToolOutput(e.message || ''), error: `Exit code ${e.status || 'unknown'}`, command };
         }
       }
 
       case 'search': {
         try {
-          const output = execSync(`rg --line-number --max-count 10 "${args.pattern.replace(/"/g, '\\"')}" .`, { encoding: 'utf-8', timeout: 10000, cwd });
-          return { result: output.slice(0, 3000) };
+          const cmd = buildCommand('rg', ['--line-number', '--max-count', '10'], String(args.pattern || '')) + ' .';
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
+          return { result: sanitizeToolOutput(output).slice(0, 3000) };
         } catch {
           return { result: 'No matches found.' };
         }
@@ -280,7 +295,10 @@ Rules:
 
       case 'find_files': {
         try {
-          const output = execSync(`rg --files --glob "${args.pattern}" --glob "!node_modules" --glob "!.git"`, { encoding: 'utf-8', timeout: 10000, cwd });
+          const cmd = 'rg --files --glob ' + escapeShellArg(String(args.pattern || ''))
+            + ' --glob ' + escapeShellArg('!node_modules')
+            + ' --glob ' + escapeShellArg('!.git');
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
           const files = output.trim().split('\n').filter(Boolean).slice(0, 30);
           return { result: files.length ? `Found ${files.length} files:\n${files.join('\n')}` : 'No files found.' };
         } catch {
