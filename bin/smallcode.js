@@ -121,7 +121,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.6.14';
+const VERSION = require('../package.json').version;
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -371,6 +371,7 @@ async function runTUI(config) {
 
   rl.on('close', () => {
     killMCP()
+    if (_lspClient) { try { _lspClient.stop(); } catch {} }
     console.log(chalk.gray('\n  Goodbye!\n'));
     process.exit(0);
   });
@@ -410,6 +411,28 @@ let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS];
 
 const MAX_TOOL_CALLS = 500;
 const MAX_IMPROVE_ITERATIONS = 2;
+
+// Estimate tokens for a message, properly accounting for tool_calls args
+// which are stored as JSON strings inside the message but are NOT in .content.
+function estimateMessageTokens(m) {
+  let chars = 0;
+  if (typeof m.content === 'string') {
+    chars += m.content.length;
+  } else if (m.content) {
+    chars += JSON.stringify(m.content).length;
+  }
+  // tool_calls messages have arguments that consume tokens but aren't in .content
+  if (m.tool_calls) {
+    for (const tc of m.tool_calls) {
+      chars += (tc.function?.name?.length || 0) + (tc.function?.arguments?.length || 0) + 20;
+    }
+  }
+  return Math.ceil(chars / 4);
+}
+
+function estimateHistoryTokens(history) {
+  return history.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+}
 
 async function runAgentLoop(userMessage, config) {
   // Reset early-stop state for new turn
@@ -548,13 +571,12 @@ async function runAgentLoop(userMessage, config) {
   }
 
   // Auto-compact: estimate tokens and aggressively trim to stay within context window
-  const estimatedTokens = conversationHistory.reduce((sum, m) => {
-    const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-    return sum + Math.ceil(content.length / 4);
-  }, 0);
+  // Fix: trigger on EITHER token overflow OR message count (not just one condition for both).
+  // For small-context models (8k-16k) the token check matters most.
+  const estimatedTokens = estimateHistoryTokens(conversationHistory);
   const maxContextTokens = (config.context?.detected_window || 128000) * ((config.context?.max_budget_pct || 70) / 100);
 
-  if (estimatedTokens > maxContextTokens || conversationHistory.length > 30) {
+  if (estimatedTokens > maxContextTokens * 0.8 || conversationHistory.length > 30) {
     // Phase B: Try MarrowScript-compiled compress_history first.
     // It produces a semantic summary instead of just dropping messages.
     let compressedSuccessfully = false;
@@ -575,7 +597,7 @@ async function runAgentLoop(userMessage, config) {
                 return `[${role}] ${content.slice(0, 1500)}`;
               })
               .join('\n\n');
-            const targetTokens = Math.max(200, Math.floor(maxContextTokens * 0.1));
+            const targetTokens = Math.max(200, Math.min(1500, Math.floor(maxContextTokens * 0.05)));
             const summary = await compressHistoryCompiled(oldSerialized, targetTokens);
             if (summary && summary.length > 0) {
               // Replace old messages with a single summary system message
@@ -594,11 +616,11 @@ async function runAgentLoop(userMessage, config) {
     // Fallback: drop oldest non-system messages until under budget
     if (!compressedSuccessfully) {
       while (conversationHistory.length > 6) {
-        const currentEst = conversationHistory.reduce((sum, m) => {
-          const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-          return sum + Math.ceil(c.length / 4);
-        }, 0);
-        if (currentEst < maxContextTokens * 0.7 && conversationHistory.length <= 20) break;
+        const currentEst = estimateHistoryTokens(conversationHistory);
+        // Fix #19: Always compact until under 70% of budget. The old condition
+        // `&& conversationHistory.length <= 20` would stop compacting at 20
+        // messages even if still way over budget (e.g. 20 messages of 2000 tokens each).
+        if (currentEst < maxContextTokens * 0.7) break;
         const removeIdx = conversationHistory.findIndex(m => m.role !== 'system');
         if (removeIdx === -1) break;
         conversationHistory.splice(removeIdx, 1);
@@ -615,22 +637,79 @@ async function runAgentLoop(userMessage, config) {
     // Mid-turn context check: if history is getting too large, evict old tool results
     // This prevents context overflow during long tool-call chains
     if (toolCallsThisTurn > 0 && toolCallsThisTurn % 3 === 0) {
-      const midEst = conversationHistory.reduce((sum, m) => {
-        const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-        return sum + Math.ceil(c.length / 4);
-      }, 0);
+      let midEst = estimateHistoryTokens(conversationHistory);
       const maxBudget = (config.context?.detected_window || 128000) * 0.6;
       if (midEst > maxBudget) {
-        // Evict oldest tool results (keep user/assistant messages intact)
+        // Fix #14: First pass — truncate large tool_call arguments in OLD assistant
+        // messages (not the most recent one). After the tool result has been received,
+        // the model doesn't need the full write_file content in arguments anymore.
+        const lastAssistantIdx = conversationHistory.reduce((last, m, i) => m.tool_calls ? i : last, -1);
+        for (let i = 0; i < lastAssistantIdx; i++) {
+          const m = conversationHistory[i];
+          if (!m.tool_calls) continue;
+          for (const tc of m.tool_calls) {
+            if (tc.function && tc.function.arguments && tc.function.arguments.length > 200) {
+              const saved = tc.function.arguments.length;
+              // Replace with minimal valid JSON that preserves the tool name context.
+              // Defensive: if arguments are already invalid JSON (from a prior truncation
+              // pass that produced '...' suffixes), just replace with '{}' directly.
+              try {
+                const parsed = JSON.parse(tc.function.arguments);
+                const minimal = {};
+                for (const [k, v] of Object.entries(parsed)) {
+                  if (typeof v === 'string' && v.length > 100) {
+                    minimal[k] = v.slice(0, 80) + '…';
+                  } else {
+                    minimal[k] = v;
+                  }
+                }
+                tc.function.arguments = JSON.stringify(minimal);
+              } catch {
+                // Already invalid JSON — reset to empty object to avoid cascading
+                // parse failures on subsequent passes or API calls.
+                tc.function.arguments = '{}';
+              }
+              midEst -= Math.ceil((saved - tc.function.arguments.length) / 4);
+            }
+          }
+        }
+
         let evicted = 0;
         for (let i = 0; i < conversationHistory.length && midEst > maxBudget * 0.7; i++) {
           if (conversationHistory[i].role === 'tool') {
-            const len = Math.ceil((conversationHistory[i].content || '').length / 4);
-            conversationHistory.splice(i, 1);
-            evicted++;
-            i--;
+            const tcId = conversationHistory[i].tool_call_id;
+            // Only evict if the corresponding assistant message was also evicted
+            // (i.e. its tool_call_id is no longer referenced). To be safe in
+            // one pass, we evict tool+assistant pairs from the oldest end:
+            // find the assistant message that owns this tool result.
+            let ownerIdx = -1;
+            for (let j = i - 1; j >= 0; j--) {
+              if (conversationHistory[j].tool_calls &&
+                  conversationHistory[j].tool_calls.some(tc => tc.id === tcId)) {
+                ownerIdx = j;
+                break;
+              }
+            }
+            // Only evict if the owner is in the first half of history (old enough)
+            // AND we can remove the pair together. Otherwise skip to avoid orphaning.
+            if (ownerIdx >= 0 && ownerIdx < conversationHistory.length / 2) {
+              // Replace the tool result with a compact summary
+              const content = conversationHistory[i].content || '';
+              const len = Math.ceil(content.length / 4);
+              conversationHistory[i].content = `[evicted: ${len} tokens]`;
+              midEst -= len - 5;
+              evicted++;
+            } else if (ownerIdx === -1) {
+              // Orphaned tool result (owner already gone) — safe to remove
+              const len = Math.ceil((conversationHistory[i].content || '').length / 4);
+              conversationHistory.splice(i, 1);
+              midEst -= len;
+              evicted++;
+              i--;
+            }
           }
         }
+        if (evicted > 0) tokenMonitor.recordEviction();
       }
     }
 
@@ -646,11 +725,21 @@ async function runAgentLoop(userMessage, config) {
 
     // If model wants to call tools
     if (message.tool_calls && message.tool_calls.length > 0) {
-      // After first tool call, widen to all tools for subsequent iterations
-      // (model may need different categories mid-turn)
-      currentToolCategory = null;
+      // After first tool call, widen tool set for subsequent iterations.
+      // If the model just called select_category, currentToolCategory was already
+      // set to the selected category by the handler below. Otherwise, widen to
+      // 'plan' which in the compiled router maps to all essential tools.
+      const firstToolName = message.tool_calls[0]?.function?.name;
+      if (firstToolName !== 'select_category') {
+        currentToolCategory = 'plan';
+      }
 
-      // Add assistant message with tool calls to history
+      // Add assistant message with tool calls to history.
+      // Fix #14: We store the ORIGINAL message here (it must have valid JSON args
+      // for the next API call to work). The context savings come from the mid-turn
+      // eviction and compaction logic, not from corrupting args mid-conversation.
+      // However, once a tool_call has been fully processed (tool result received),
+      // we'll truncate large args in the stored message during mid-turn eviction.
       conversationHistory.push(message);
 
       for (const tc of message.tool_calls) {
@@ -688,6 +777,12 @@ async function runAgentLoop(userMessage, config) {
 
         const result = await executeTool(toolName, toolArgs);
         const toolMs = Date.now() - toolStart2;
+
+        // Handle select_category: update the tool category so the NEXT
+        // chatCompletion call injects the right tool schemas for stage 2.
+        if (toolName === 'select_category' && result.category) {
+          currentToolCategory = result.category;
+        }
 
         // Record trace step
         traceRecorder.recordToolCall(toolName, toolArgs, result.result || result.error || '', toolMs);
@@ -776,13 +871,19 @@ ${validation.errors.join('\n')}${historyStr}
 Fix these errors. Do NOT repeat the same approach that failed before.`;
               } else {
                 // Escalated: show the full file + errors + history
+                // CAP file content to ~2000 tokens (8000 chars) to prevent context blow-up.
+                // On small-context models (8k-16k) injecting a 5000-line file is fatal.
                 let fileContent = '';
                 try { fileContent = fs.readFileSync(path.resolve(process.cwd(), filePath), 'utf-8'); } catch {}
+                const maxFileChars = Math.min(8000, Math.floor(((config.context?.detected_window || 32768) * 0.15) * 4));
+                const cappedFile = fileContent.length > maxFileChars
+                  ? fileContent.slice(0, maxFileChars) + `\n... (${Math.ceil((fileContent.length - maxFileChars)/4)} more tokens truncated)`
+                  : fileContent;
                 fixPrompt = `[AUTO-VALIDATE] After ${attempt} attempts, ${filePath} still has errors.${historyStr}
 
 FULL FILE CONTENT:
 \`\`\`
-${fileContent}
+${cappedFile}
 \`\`\`
 
 ERRORS:
@@ -808,7 +909,13 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
                 // Decompose has been tried and failed — ESCALATE to stronger model
                 console.log(`  \x1b[35m⬆ ESCALATING to ${escalationEngine.provider} (${escalationEngine.model}) — local model exhausted\x1b[0m`);
                 
-                const escalationPrompt = `Fix these errors in ${filePath}. The code:\n\`\`\`\n${fileContent}\n\`\`\`\n\nErrors:\n${validation.errors.join('\n')}\n\nPrevious attempts failed. Fix it correctly.`;
+                // Cap file content for escalation to prevent context overflow on the
+                // escalation model too (which has its own context limit).
+                const maxEscFileChars = 12000;
+                const cappedEscFile = fileContent.length > maxEscFileChars
+                  ? fileContent.slice(0, maxEscFileChars) + `\n... (truncated, ${fileContent.split('\n').length} lines total)`
+                  : fileContent;
+                const escalationPrompt = `Fix these errors in ${filePath}. The code:\n\`\`\`\n${cappedEscFile}\n\`\`\`\n\nErrors:\n${validation.errors.join('\n')}\n\nPrevious attempts failed. Fix it correctly.`;
                 const escalationMessages = [
                   ...conversationHistory.slice(-6), // Recent context
                   { role: 'user', content: escalationPrompt },
@@ -876,9 +983,12 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
           improvementAttempts['__bash']++;
 
           if (improvementAttempts['__bash'] <= 2) {
+            // Fix #5: Cap error output to 800 chars (~200 tokens) to prevent
+            // context accumulation. The full output is already in the tool result.
+            const cappedError = (result.result || '').slice(0, 800);
             conversationHistory.push({
               role: 'user',
-              content: `[AUTO-FIX] The command FAILED (attempt ${improvementAttempts['__bash']}/2). Do NOT claim success. The error was:\n${(result.result || '').slice(0, 1500)}\n\nRead the error, identify the bug, and fix it.`,
+              content: `[AUTO-FIX] The command FAILED (attempt ${improvementAttempts['__bash']}/2). Do NOT claim success. The error was:\n${cappedError}\n\nRead the error, identify the bug, and fix it.`,
             });
           } else {
             // DECOMPOSE: bash keeps failing, break the problem apart
@@ -1046,16 +1156,16 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
     // Auto git commit if files were changed and we're in a git repo
     if (config.git?.auto_commit === true || process.env.SMALLCODE_AUTO_COMMIT === 'true') {
       try {
-        const { execSync } = require('child_process');
+        const { execSync, execFileSync } = require('child_process');
         const status = execSync('git status --porcelain', { encoding: 'utf-8', cwd: process.cwd(), timeout: 5000 });
         if (status.trim()) {
           // Get a short summary from the first user message this turn
           const lastUser = [...conversationHistory].reverse().find(m => m.role === 'user' && !m.content.startsWith('['));
           const commitMsg = lastUser
-            ? `smallcode: ${lastUser.content.slice(0, 50).replace(/\n/g, ' ')}`
+            ? `smallcode: ${lastUser.content.slice(0, 50).replace(/[\n\r"'`$\\]/g, ' ').trim()}`
             : 'smallcode: auto-commit';
-          execSync('git add -A', { cwd: process.cwd(), timeout: 5000 });
-          execSync(`git commit -m "${commitMsg.replace(/"/g, '\\"')}"`, { encoding: 'utf-8', cwd: process.cwd(), timeout: 10000 });
+          execFileSync('git', ['add', '-A'], { cwd: process.cwd(), timeout: 5000 });
+          execFileSync('git', ['commit', '-m', commitMsg], { encoding: 'utf-8', cwd: process.cwd(), timeout: 10000 });
           if (_fullscreenRef) {
             _fullscreenRef.addTool('git', 'ok', `committed: ${commitMsg.slice(0, 60)}`);
           } else {
@@ -1093,93 +1203,12 @@ async function initLSP() {
   return _lspClient;
 }
 
+// runValidation: delegate to the hardened version in model_client.js
+// which uses execFileSync with arg arrays (no shell injection via filePath).
+// The old inline version used shell-interpolated strings which allowed a
+// model-controlled filePath like `foo.py"; rm -rf /; echo "` to execute.
 function runValidation(filePath) {
-  const { execSync } = require('child_process');
-  const ext = path.extname(filePath);
-  const cwd = process.cwd();
-
-  let cmd = null;
-  let parseErrors = null;
-
-  // TypeScript
-  if ((ext === '.ts' || ext === '.tsx') && fs.existsSync(path.join(cwd, 'tsconfig.json'))) {
-    cmd = 'npx tsc --noEmit --pretty false 2>&1';
-    parseErrors = (output) => {
-      return output.split('\n')
-        .filter(l => l.includes(filePath) && l.includes('error'))
-        .slice(0, 5);
-    };
-  }
-  // Python
-  else if (ext === '.py') {
-    cmd = `python -m py_compile "${filePath}" 2>&1`;
-    parseErrors = (output) => output.trim() ? [output.trim()] : [];
-  }
-  // Rust
-  else if (ext === '.rs' && fs.existsSync(path.join(cwd, 'Cargo.toml'))) {
-    cmd = 'cargo check --message-format short 2>&1';
-    parseErrors = (output) => {
-      return output.split('\n')
-        .filter(l => l.startsWith('error'))
-        .slice(0, 5);
-    };
-  }
-  // Go
-  else if (ext === '.go' && fs.existsSync(path.join(cwd, 'go.mod'))) {
-    cmd = 'go build ./... 2>&1';
-    parseErrors = (output) => {
-      return output.split('\n')
-        .filter(l => l.includes(filePath))
-        .slice(0, 5);
-    };
-  }
-  // JavaScript/Node (eslint or basic syntax check)
-  else if (ext === '.js' || ext === '.mjs') {
-    cmd = `node --check "${filePath}" 2>&1`;
-    parseErrors = (output) => output.trim() ? [output.trim()] : [];
-  }
-  // JSON validation
-  else if (ext === '.json') {
-    try {
-      JSON.parse(fs.readFileSync(path.resolve(process.cwd(), filePath), 'utf-8'));
-      return { passed: true, errors: [] };
-    } catch (e) {
-      return { passed: false, errors: [e.message] };
-    }
-  }
-  // BoneScript validation
-  else if (ext === '.bone') {
-    const compilerPaths = [
-      path.resolve(__dirname, '..', 'node_modules', 'bonescript-compiler', 'dist', 'cli.js'),
-      path.resolve(__dirname, '..', '..', 'BoneScript', 'compiler', 'dist', 'cli.js'),
-    ];
-    let compiler = null;
-    for (const cp of compilerPaths) {
-      if (fs.existsSync(cp)) { compiler = cp; break; }
-    }
-    if (!compiler) return null; // No validator available
-    // Try bone_check — if it crashes (not installed properly), skip validation
-    try {
-      const { execSync } = require('child_process');
-      execSync(`node "${compiler}" --version`, { encoding: 'utf-8', timeout: 5000, cwd: process.cwd() });
-    } catch {
-      return null; // Compiler not working, skip .bone validation
-    }
-    cmd = `node "${compiler}" check "${filePath}" 2>&1`;
-    parseErrors = (output) => output.split('\n').filter(l => l.includes('error')).slice(0, 5);
-  }
-
-  if (!cmd) return null;  // No validator for this file type
-
-  try {
-    execSync(cmd, { encoding: 'utf-8', timeout: 20000, cwd });
-    return { passed: true, errors: [] };
-  } catch (e) {
-    const output = (e.stdout || '') + (e.stderr || '');
-    const errors = parseErrors(output).filter(Boolean);
-    if (errors.length === 0) return { passed: true, errors: [] };
-    return { passed: false, errors };
-  }
+  return _runValidationModule(filePath);
 }
 
 // Build a compact system prompt — only includes sections relevant to the task type
@@ -1209,40 +1238,70 @@ Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concis
 }
 
 // Auto-load relevant memory for the current task (injected into system prompt)
+// Fix #15: Only inject memory objects with score >= 2 (at least 2 word matches)
+// to avoid burning tokens on low-relevance hits.
 function getMemoryContext(messages) {
   try {
     // Get the last user message to find relevant memory
     const lastUser = [...messages].reverse().find(m => m.role === 'user');
     if (!lastUser || !memoryStore.loadForTask) return '';
 
-    const { objects, tokens_used } = memoryStore.loadForTask(lastUser.content, 800);
-    if (objects.length === 0) return '';
+    // loadForTask returns scored objects; only include those with meaningful relevance
+    const maxTokens = Math.min(800, Math.floor(((config?.context?.detected_window || 32768) * 0.03)));
+    const objects = memoryStore.loadForTask(lastUser.content, maxTokens);
+    // Handle both old format (array) and new format ({objects, tokens_used})
+    const items = Array.isArray(objects) ? objects : (objects?.objects || []);
+    if (items.length === 0) return '';
 
-    return '\n\nRelevant project memory:\n' + objects.map(o => `[${o.type}] ${o.title}: ${o.content}`).join('\n');
+    // Cap total injection to ~800 tokens (3200 chars)
+    let output = '\n\nRelevant project memory:\n';
+    let chars = output.length;
+    const maxChars = 3200;
+    for (const o of items) {
+      const entry = `[${o.type}] ${o.title}: ${o.content}\n`;
+      if (chars + entry.length > maxChars) break;
+      output += entry;
+      chars += entry.length;
+    }
+    return output;
   } catch {
     return '';
   }
 }
 
 // Auto-load relevant skills based on the user's message
+// Fix #18: Cap skill injection to ~1000 tokens (4000 chars). Multiple matching
+// skills can each be a full .md file, quickly blowing up the system prompt.
 function getSkillContext(messages) {
   if (!skillManager) return '';
   try {
     const lastUser = [...messages].reverse().find(m => m.role === 'user');
     if (!lastUser) return '';
     const skills = skillManager.getAutoSkills(lastUser.content);
-    return skillManager.formatForPrompt(skills);
+    if (skills.length === 0) return '';
+    const formatted = skillManager.formatForPrompt(skills);
+    // Hard cap: truncate if too long
+    return formatted.length > 4000
+      ? formatted.slice(0, 4000) + '\n... (skills truncated to fit context)'
+      : formatted;
   } catch {
     return '';
   }
 }
 
 // Get plugin prompt injections for the current task type
+// Fix #17: Cap plugin injection to ~500 tokens (2000 chars).
 function getPluginPrompts() {
   if (!pluginLoader) return '';
   try {
     const injection = pluginLoader.getPromptInjections(currentTaskType);
-    return injection ? '\n\n' + injection : '';
+    if (!injection) return '';
+    // Hard cap: a single misconfigured plugin with 10k content shouldn't
+    // blow up the system prompt.
+    const capped = injection.length > 2000
+      ? injection.slice(0, 2000) + '\n... (plugin prompts truncated)'
+      : injection;
+    return '\n\n' + capped;
   } catch {
     return '';
   }
@@ -1264,19 +1323,27 @@ async function chatCompletion(config, messages) {
       if (!msg || typeof msg.content !== 'string') return msg;
       return { ...msg, content: msg.content.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '') };
     }
+    const processedMessages = messages.map(stripAnsiFromMsg);
 
     // Transform messages with images into multimodal format
+    // OPTIMIZATION: Only re-extract images from the LAST user message (the new one).
+    // Older messages that had images already had their content consumed; re-reading
+    // the image from disk on every call is both wasteful (disk I/O) and causes
+    // context overflow (a 1MB PNG = ~330k base64 tokens sent on EVERY API call).
     const { extractImages, formatImagesForAPI, modelSupportsVision } = require('../src/session/images');
-    const processedMessages = messages.map(msg => {
-      const clean = stripAnsiFromMsg(msg);
-      if (clean.role !== 'user' || typeof clean.content !== 'string') return clean;
-      const images = extractImages(clean.content, process.cwd());
-      if (images.length === 0 || !modelSupportsVision(config.model.name)) return clean;
-      // Convert to multimodal content array
+    const lastUserIdx = processedMessages.length > 0
+      ? processedMessages.reduce((last, m, i) => m.role === 'user' ? i : last, -1)
+      : -1;
+    const processedWithImages = processedMessages.map((msg, idx) => {
+      if (msg.role !== 'user' || typeof msg.content !== 'string') return msg;
+      // Only extract images from the most recent user message
+      if (idx !== lastUserIdx) return msg;
+      const images = extractImages(msg.content, process.cwd());
+      if (images.length === 0 || !modelSupportsVision(config.model.name)) return msg;
       return {
-        ...clean,
+        ...msg,
         content: [
-          { type: 'text', text: clean.content },
+          { type: 'text', text: msg.content },
           ...formatImagesForAPI(images),
         ],
       };
@@ -1284,7 +1351,7 @@ async function chatCompletion(config, messages) {
 
     const body = {
       model: config.model.name,
-      messages: [systemMsg, ...processedMessages],
+      messages: [systemMsg, ...processedWithImages],
       tools: getAllTools(config, currentToolCategory),
       temperature: 0.1,
       max_tokens: 4096,
@@ -1400,6 +1467,30 @@ async function streamFinalResponse(config, messages) {
       headers['X-Title'] = 'SmallCode';
     }
 
+    // Fix #3: Only include messages that form valid pairs. Strip tool_call
+    // assistant messages that don't have a following tool result (which causes
+    // 400 errors on strict providers). Also strip tool messages whose assistant
+    // owner was already dropped by the slice.
+    const recent = messages.slice(-8);
+    const safeMessages = [];
+    for (let i = 0; i < recent.length; i++) {
+      const m = recent[i];
+      if (m.tool_calls) {
+        // Only include if ALL tool_call_ids have a matching tool result after it
+        const ids = m.tool_calls.map(tc => tc.id);
+        const hasAll = ids.every(id => recent.slice(i + 1).some(r => r.role === 'tool' && r.tool_call_id === id));
+        if (hasAll) safeMessages.push(m);
+        // else skip it
+      } else if (m.role === 'tool') {
+        // Only include if there's a preceding assistant with this tool_call_id
+        const hasOwner = safeMessages.some(s => s.tool_calls && s.tool_calls.some(tc => tc.id === m.tool_call_id));
+        if (hasOwner) safeMessages.push(m);
+        // else skip orphan
+      } else {
+        safeMessages.push(m);
+      }
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout for summary
 
@@ -1408,7 +1499,7 @@ async function streamFinalResponse(config, messages) {
       headers,
       body: JSON.stringify({
         model: config.model.name,
-        messages: [systemMsg, ...messages.slice(-6)],
+        messages: [systemMsg, ...safeMessages.slice(-6)],
         stream: true,
         temperature: 0.1,
         max_tokens: 256,
@@ -1614,13 +1705,16 @@ async function runNonInteractive(config, prompt) {
 // ─── MCP Server Mode ─────────────────────────────────────────────────────────
 
 function runMCP() {
-  // Minimal MCP server implementation over stdio
+  // Minimal MCP server implementation over stdio.
+  // Tool calls are handled async — we buffer the response and write it
+  // when the handler resolves. This fixes the bug where smallcode_agent
+  // (which calls the async runAgentLoop) would return before completing.
   const rl = readline.createInterface({ input: process.stdin });
 
-  rl.on('line', (line) => {
+  rl.on('line', async (line) => {
     try {
       const request = JSON.parse(line);
-      const response = handleMCPRequest(request);
+      const response = await handleMCPRequest(request);
       console.log(JSON.stringify(response));
     } catch (err) {
       console.log(JSON.stringify({
@@ -1632,7 +1726,7 @@ function runMCP() {
   });
 }
 
-function handleMCPRequest(request) {
+async function handleMCPRequest(request) {
   const { id, method } = request;
   switch (method) {
     case 'initialize':
@@ -1652,53 +1746,76 @@ function handleMCPRequest(request) {
         { name: 'smallcode_agent', description: 'Send a prompt to SmallCode agent', inputSchema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] } },
       ]}};
     case 'tools/call':
-      return handleMCPToolCall(id, request.params);
+      return await handleMCPToolCall(id, request.params);
     default:
       return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown method: ${method}` }};
   }
 }
 
-function handleMCPToolCall(id, params) {
+async function handleMCPToolCall(id, params) {
   const { name, arguments: args } = params;
+  const { safeResolvePath, escapeShellArg, sanitizeToolOutput } = require('../src/security/sanitize');
+  const cwd = process.cwd();
   let result = '';
 
   switch (name) {
-    case 'smallcode_read_file':
-      try { result = fs.readFileSync(path.resolve(args.path), 'utf-8'); }
+    case 'smallcode_read_file': {
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${safe.reason}` }], isError: true }};
+      try { result = sanitizeToolOutput(fs.readFileSync(safe.fullPath, 'utf-8')); }
       catch (e) { return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true }}; }
       break;
-    case 'smallcode_bash':
+    }
+    case 'smallcode_bash': {
+      const { execSync } = require('child_process');
+      const command = String(args.command || '');
+      // Apply same blocked-command checks as the agent's bash tool
+      if (/rm\s+-rf\s+\/[^.]/.test(command) || /format\s+c:/i.test(command)) {
+        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'Error: destructive command blocked' }], isError: true }};
+      }
       try {
-        const { execSync } = require('child_process');
-        result = execSync(args.command, { encoding: 'utf-8', timeout: 30000, cwd: process.cwd() });
-      } catch (e) { result = e.stdout || e.message; }
+        const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
+        result = sanitizeToolOutput(output).slice(0, 4000);
+      } catch (e) { result = sanitizeToolOutput((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000); }
       break;
-    case 'smallcode_search':
+    }
+    case 'smallcode_search': {
+      const { execSync } = require('child_process');
+      const pattern = String(args.pattern || '');
+      const searchPath = args.path ? safeResolvePath(args.path, cwd) : { ok: true, fullPath: '.' };
+      if (!searchPath.ok) { result = `Error: ${searchPath.reason}`; break; }
       try {
-        const { execSync } = require('child_process');
-        result = execSync(`rg --line-number --max-count 10 "${args.pattern}" ${args.path || '.'}`, { encoding: 'utf-8', timeout: 10000, cwd: process.cwd() });
+        const cmd = 'rg --line-number --max-count 10 ' + escapeShellArg(pattern) + ' ' + escapeShellArg(searchPath.fullPath || '.');
+        result = sanitizeToolOutput(execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd })).slice(0, 3000);
       } catch { result = 'No matches'; }
       break;
-    case 'smallcode_patch':
+    }
+    case 'smallcode_patch': {
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) { result = `Error: ${safe.reason}`; break; }
       try {
-        const filePath = path.resolve(args.path);
-        let content = fs.readFileSync(filePath, 'utf-8');
+        let content = fs.readFileSync(safe.fullPath, 'utf-8');
         if (!content.includes(args.old_str)) { result = 'Error: old_str not found'; break; }
+        const count = content.split(args.old_str).length - 1;
+        if (count > 1) { result = `Error: old_str matches ${count} locations`; break; }
         content = content.replace(args.old_str, args.new_str);
-        fs.writeFileSync(filePath, content);
+        fs.writeFileSync(safe.fullPath, content);
         result = `Patched ${args.path}`;
       } catch (e) { result = `Error: ${e.message}`; }
       break;
+    }
     case 'smallcode_memory_load': {
-      const { objects, tokens_used } = memoryStore.loadForTask(args.task || '', 2000);
-      result = objects.length > 0 
-        ? objects.map(o => `[${o.type}] ${o.title}: ${o.content}`).join('\n\n')
+      const objects = memoryStore.loadForTask(args.task || '', 2000);
+      // Handle both array return (MemoryStore in memory.js) and {objects} return
+      const items = Array.isArray(objects) ? objects : (objects?.objects || []);
+      result = items.length > 0
+        ? items.map(o => `[${o.type}] ${o.title}: ${o.content}`).join('\n\n')
         : 'No relevant memory found.';
       break;
     }
     case 'smallcode_memory_remember': {
-      const obj = memoryStore.remember({ type: args.type || 'context', title: args.title || '', content: args.content || '', tags: args.tags || [] });
-      result = obj.duplicate ? `Already known (${obj.existing_id})` : `Remembered: [${obj.type}] ${obj.title}`;
+      const obj = memoryStore.remember(args.type || 'context', args.title || '', args.content || '', { tags: args.tags || [] });
+      result = `Remembered: [${obj.type}] ${obj.title} (${obj.id})`;
       break;
     }
     default:
@@ -1759,6 +1876,9 @@ async function main() {
     const resumed = sessionStore.resume();
     if (resumed) {
       conversationHistory.push(...resumed.messages);
+      // Clear improvement state from previous session — stale counters
+      // cause false-positive patch spirals and decompose triggers.
+      Object.keys(improvementAttempts).forEach(k => delete improvementAttempts[k]);
     }
   }
   if (!sessionStore.current) {

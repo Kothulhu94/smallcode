@@ -19,11 +19,12 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { createLineDemuxer, redactValue } = require('../security/sanitize');
 
 class MCPClient {
   constructor(projectDir) {
     this.projectDir = projectDir || process.cwd();
-    this.servers = new Map(); // name → { config, process, connected, tools }
+    this.servers = new Map(); // name → { config, process, connected, tools, demuxer, pendingRequests }
     this.tools = []; // flat list of all discovered tools
     this._requestId = 1;
   }
@@ -130,7 +131,10 @@ class MCPClient {
       if (response.isError) {
         return { error: text || 'MCP tool returned error' };
       }
-      return { result: text || '(no output)' };
+      // Sanitize MCP server output before returning — external servers can
+      // return ANSI escapes, secrets from their own env, or binary garbage.
+      const { sanitizeToolOutput } = require('../security/sanitize');
+      return { result: sanitizeToolOutput(text) || '(no output)' };
     } catch (err) {
       return { error: `MCP call failed: ${err.message}` };
     }
@@ -164,6 +168,13 @@ class MCPClient {
    */
   disconnect() {
     for (const [, server] of this.servers) {
+      // Close the demuxer first so the shared 'data' listener is detached
+      // before we kill the process. Otherwise the listener can still see
+      // EOF chunks and resolve in-flight requests with garbage.
+      if (server.demuxer) {
+        try { server.demuxer.close(); } catch {}
+        server.demuxer = null;
+      }
       if (server.process) {
         try { server.process.kill(); } catch {}
         server.process = null;
@@ -178,26 +189,57 @@ class MCPClient {
     const { config } = server;
     if (!config.command) return 0;
 
-    // Spawn the MCP server process
-    const env = { ...process.env, ...config.env };
+    // Spawn the MCP server process. Use shell:false (default) and pass
+    // args as an array — never as a single string — to avoid shell
+    // injection via crafted server config in mcp.json. We also strip
+    // SMALLCODE_*-style host secrets out of the inherited env unless
+    // the server explicitly opted in via config.env.
+    const baseEnv = { ...process.env };
+    // Drop ambient API keys from the child unless the server's config
+    // explicitly re-exports them. MCP servers run untrusted code; leaking
+    // OPENAI_API_KEY / ANTHROPIC_API_KEY etc. into a third-party server
+    // is a meaningful exfiltration risk.
+    const SECRET_ENV_VARS = [
+      'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY',
+      'OPENAI_COMPAT_API_KEY', 'OPENROUTER_API_KEY',
+      'GOOGLE_API_KEY', 'GEMINI_API_KEY',
+      'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+      'GITHUB_TOKEN', 'GITLAB_TOKEN',
+    ];
+    for (const k of SECRET_ENV_VARS) {
+      if (!(k in (config.env || {}))) delete baseEnv[k];
+    }
+    const env = { ...baseEnv, ...config.env };
     try {
       server.process = spawn(config.command, config.args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         cwd: this.projectDir,
         env,
+        shell: false, // explicit: never invoke a shell
       });
     } catch (err) {
       return 0;
     }
 
     server.process.on('error', () => { server.connected = false; });
-    server.process.on('exit', () => { server.connected = false; server.process = null; });
+    server.process.on('exit', () => {
+      server.connected = false;
+      server.process = null;
+      if (server.demuxer) { try { server.demuxer.close(); } catch {} server.demuxer = null; }
+    });
+
+    // One shared line demuxer per server; per-request handlers register
+    // briefly and unregister when the matching response arrives. This
+    // replaces the prior pattern of attaching a fresh `on('data', ...)`
+    // listener for every request, which leaked listeners under load and
+    // could resolve a request with another request's bytes.
+    server.demuxer = createLineDemuxer(server.process.stdout);
 
     // Initialize
     const initResult = await this._sendRequest(server, 'initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
-      clientInfo: { name: 'smallcode', version: '0.4.18' },
+      clientInfo: { name: 'smallcode', version: require('../../package.json').version },
     });
 
     if (!initResult) {
@@ -230,7 +272,7 @@ class MCPClient {
 
   _sendRequest(server, method, params) {
     return new Promise((resolve) => {
-      if (!server.process || !server.process.stdin || !server.process.stdout) {
+      if (!server.process || !server.process.stdin || !server.demuxer) {
         resolve(null);
         return;
       }
@@ -238,31 +280,32 @@ class MCPClient {
       const id = this._requestId++;
       const request = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
 
-      let buffer = '';
-      const onData = (chunk) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const resp = JSON.parse(line);
-            if (resp.id === id) {
-              server.process.stdout.off('data', onData);
-              resolve(resp.result || null);
-            }
-          } catch {}
-        }
+      let timer = null;
+      const finish = (val) => {
+        if (timer) clearTimeout(timer);
+        server.demuxer.unregister(id);
+        resolve(val);
       };
 
-      server.process.stdout.on('data', onData);
-      server.process.stdin.write(request);
+      server.demuxer.register(id, (line) => {
+        try {
+          const resp = JSON.parse(line);
+          if (resp.id === id) {
+            finish(resp.result || null);
+          }
+        } catch { /* not our line; demuxer keeps trying others */ }
+      });
 
-      // Timeout after 10s
-      setTimeout(() => {
-        if (server.process) server.process.stdout.off('data', onData);
-        resolve(null);
-      }, 10000);
+      try {
+        server.process.stdin.write(request);
+      } catch {
+        finish(null);
+        return;
+      }
+
+      // Timeout after 10s. Note: we resolve null rather than reject so
+      // callers don't blow up — MCP errors are operational, not fatal.
+      timer = setTimeout(() => finish(null), 10000);
     });
   }
 

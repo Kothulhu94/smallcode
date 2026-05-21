@@ -89,7 +89,7 @@ const CATEGORIES = {
     weight: 0.8,
     minConfidence: 0.3,
     signals: [
-      { re: /\b(explain|what\s+is|what\s+are|how\s+does|tell\s+me|describe)\b/i, w: 3.0 },
+      { re: /\b(explain|what\s+is|what\s+are|what\s+does|how\s+does|how\s+do|tell\s+me|describe)\b/i, w: 3.0 },
       { re: /\b(why\s+is|why\s+does|why\s+do|why\s+did|why\s+doesn't|why\s+won't)\b/i, w: 1.5 },
       { re: /\b(difference\s+between|compare|vs|versus)\b/i, w: 2.5 },
       { re: /\b(help|guide|tutorial|example|show\s+me\s+how)\b/i, w: 2.0 },
@@ -107,7 +107,7 @@ const PRIORITY = ['write', 'run', 'search', 'plan', 'read', 'web', 'respond'];
 // Policy constants
 const SHORT_MSG_THRESHOLD = 10;
 const LONG_MSG_THRESHOLD = 200;
-const FALLBACK = 'write';
+const FALLBACK = 'respond'; // When nothing matches, respond is safest (no tools wasted)
 const SHORT_MSG_DEFAULT = 'respond';
 
 /**
@@ -210,21 +210,21 @@ function classifyToolCategory(message) {
 function getToolsForCategory(category) {
   switch (category) {
     case 'read':
-      return ['read_file', 'list_projects', 'graph_search'];
+      return ['read_file', 'list_projects', 'graph_search', 'find_files', 'find_and_read'];
     case 'write':
-      return ['read_file', 'write_file', 'patch', 'bash'];
+      return ['read_file', 'write_file', 'patch', 'bash', 'read_and_patch', 'create_and_run'];
     case 'search':
-      return ['grep', 'find_files', 'graph_search', 'read_file'];
+      return ['search', 'find_files', 'graph_search', 'read_file', 'explain_symbol', 'search_and_read'];
     case 'run':
       return ['bash', 'run', 'read_file'];
     case 'plan':
-      return ['read_file', 'write_file', 'patch', 'bash', 'grep', 'find_files', 'graph_search'];
+      return ['read_file', 'write_file', 'patch', 'bash', 'search', 'find_files', 'graph_search', 'memory_load', 'memory_remember', 'bone_compile', 'bone_check', 'read_and_patch', 'create_and_run', 'find_and_read', 'search_and_read'];
     case 'web':
       return ['web_search', 'web_fetch', 'read_file'];
     case 'respond':
       return []; // No tools needed for pure responses
     default:
-      return ['read_file', 'write_file', 'patch', 'bash', 'grep'];
+      return ['read_file', 'write_file', 'patch', 'bash', 'search'];
   }
 }
 

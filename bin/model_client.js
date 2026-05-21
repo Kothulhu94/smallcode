@@ -8,6 +8,7 @@
 const path = require('path');
 const fs = require('fs');
 const { buildAuthHeaders } = require('./config');
+const { redactString } = require('../src/security/sanitize');
 
 /**
  * Make a chat completion request (non-streaming, for tool use).
@@ -56,7 +57,10 @@ async function chatCompletion(ctx) {
           if (retry.ok) return await retry.json();
         } catch {}
       }
-      console.log(`  \x1b[31m✗ API error ${response.status}: ${err.slice(0, 200)}\x1b[0m`);
+      // Redact the error response — providers sometimes echo the request
+      // back, including the Authorization header value, when responding
+      // with 401/403. Never print raw provider errors verbatim.
+      console.log(`  \x1b[31m✗ API error ${response.status}: ${redactString(err.slice(0, 200))}\x1b[0m`);
       return null;
     }
 
@@ -157,34 +161,60 @@ async function streamFinalResponse(ctx) {
 
 /**
  * Validate a file (compile check, syntax check, etc.).
+ *
+ * Note: filePath comes from the agent (which is itself prompted by the
+ * model). It is interpolated into shell commands below via execFileSync
+ * with an args array — never via string interpolation — so a model that
+ * tries to inject a quoted command tail can't.
  */
 function runValidation(filePath) {
-  const { execSync } = require('child_process');
+  const { execFileSync, execSync } = require('child_process');
   const ext = path.extname(filePath);
   const cwd = process.cwd();
 
-  let cmd = null;
-  let parseErrors = null;
+  // Reject obviously hostile filePaths early.
+  if (typeof filePath !== 'string' || filePath.indexOf('\u0000') !== -1) {
+    return { passed: false, errors: ['invalid filePath'] };
+  }
+
+  // Helper: run an external program with args and uniform error parsing.
+  const runArgs = (cmd, args, parseErrors) => {
+    try {
+      execFileSync(cmd, args, { encoding: 'utf-8', timeout: 20000, cwd });
+      return { passed: true, errors: [] };
+    } catch (e) {
+      const output = (e.stdout || '') + (e.stderr || '');
+      const errors = parseErrors(output).filter(Boolean);
+      if (errors.length === 0) return { passed: true, errors: [] };
+      return { passed: false, errors };
+    }
+  };
 
   if ((ext === '.ts' || ext === '.tsx') && fs.existsSync(path.join(cwd, 'tsconfig.json'))) {
-    cmd = 'npx tsc --noEmit --pretty false 2>&1';
-    parseErrors = (output) => output.split('\n').filter(l => l.includes(filePath) && l.includes('error')).slice(0, 5);
-  } else if (ext === '.py') {
-    cmd = `python -m py_compile "${filePath}" 2>&1`;
-    parseErrors = (output) => output.trim() ? [output.trim()] : [];
-  } else if (ext === '.rs' && fs.existsSync(path.join(cwd, 'Cargo.toml'))) {
-    cmd = 'cargo check --message-format short 2>&1';
-    parseErrors = (output) => output.split('\n').filter(l => l.startsWith('error')).slice(0, 5);
-  } else if (ext === '.go' && fs.existsSync(path.join(cwd, 'go.mod'))) {
-    cmd = 'go build ./... 2>&1';
-    parseErrors = (output) => output.split('\n').filter(l => l.includes(filePath)).slice(0, 5);
-  } else if (ext === '.js' || ext === '.mjs') {
-    cmd = `node --check "${filePath}" 2>&1`;
-    parseErrors = (output) => output.trim() ? [output.trim()] : [];
-  } else if (ext === '.json') {
+    return runArgs('npx', ['tsc', '--noEmit', '--pretty', 'false'],
+      (output) => output.split('\n').filter(l => l.includes(filePath) && l.includes('error')).slice(0, 5));
+  }
+  if (ext === '.py') {
+    return runArgs('python', ['-m', 'py_compile', filePath],
+      (output) => output.trim() ? [output.trim()] : []);
+  }
+  if (ext === '.rs' && fs.existsSync(path.join(cwd, 'Cargo.toml'))) {
+    return runArgs('cargo', ['check', '--message-format', 'short'],
+      (output) => output.split('\n').filter(l => l.startsWith('error')).slice(0, 5));
+  }
+  if (ext === '.go' && fs.existsSync(path.join(cwd, 'go.mod'))) {
+    return runArgs('go', ['build', './...'],
+      (output) => output.split('\n').filter(l => l.includes(filePath)).slice(0, 5));
+  }
+  if (ext === '.js' || ext === '.mjs') {
+    return runArgs('node', ['--check', filePath],
+      (output) => output.trim() ? [output.trim()] : []);
+  }
+  if (ext === '.json') {
     try { JSON.parse(fs.readFileSync(path.resolve(cwd, filePath), 'utf-8')); return { passed: true, errors: [] }; }
     catch (e) { return { passed: false, errors: [e.message] }; }
-  } else if (ext === '.bone') {
+  }
+  if (ext === '.bone') {
     const compilerPaths = [
       path.resolve(__dirname, '..', 'node_modules', 'bonescript-compiler', 'dist', 'cli.js'),
       path.resolve(__dirname, '..', '..', 'BoneScript', 'compiler', 'dist', 'cli.js'),
@@ -192,22 +222,12 @@ function runValidation(filePath) {
     let compiler = null;
     for (const cp of compilerPaths) { if (fs.existsSync(cp)) { compiler = cp; break; } }
     if (!compiler) return null;
-    try { execSync(`node "${compiler}" --version`, { encoding: 'utf-8', timeout: 5000, cwd }); } catch { return null; }
-    cmd = `node "${compiler}" check "${filePath}" 2>&1`;
-    parseErrors = (output) => output.split('\n').filter(l => l.includes('error')).slice(0, 5);
+    try { execFileSync('node', [compiler, '--version'], { encoding: 'utf-8', timeout: 5000, cwd }); } catch { return null; }
+    return runArgs('node', [compiler, 'check', filePath],
+      (output) => output.split('\n').filter(l => l.includes('error')).slice(0, 5));
   }
 
-  if (!cmd) return null;
-
-  try {
-    execSync(cmd, { encoding: 'utf-8', timeout: 20000, cwd });
-    return { passed: true, errors: [] };
-  } catch (e) {
-    const output = (e.stdout || '') + (e.stderr || '');
-    const errors = parseErrors(output).filter(Boolean);
-    if (errors.length === 0) return { passed: true, errors: [] };
-    return { passed: false, errors };
-  }
+  return null;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

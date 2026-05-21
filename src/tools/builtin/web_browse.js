@@ -7,6 +7,33 @@
 //   web_search — search the web, return top results
 //   web_fetch  — fetch a URL, extract readable text
 //   web_browse — full browser: navigate, click, extract (advanced)
+//
+// Safety: every URL passed to webFetch is validated against the SSRF
+// guard so an LLM can't trick the tool into hitting cloud-metadata URLs
+// or RFC1918 internal services without the operator's explicit consent.
+
+const { sanitizeToolOutput } = require('../../security/sanitize');
+
+let _ssrfGuard = null;
+function _assertUrlSafe(url) {
+  if (!_ssrfGuard) {
+    try { _ssrfGuard = require('../../compiled/providers/ssrf_guard'); }
+    catch { _ssrfGuard = { assertEndpointAllowed: () => {} }; }
+  }
+  // For web fetch we apply a stricter rule: outside of explicit allowlist or
+  // LLM_ALLOW_PUBLIC_ENDPOINTS=1, refuse RFC1918/loopback too. Reuse the
+  // base guard for metadata/link-local protection regardless.
+  _ssrfGuard.assertEndpointAllowed(url);
+  if (process.env.LLM_ALLOW_PUBLIC_ENDPOINTS === '1') return;
+  const u = new URL(url);
+  const host = u.hostname.toLowerCase();
+  if (host === 'localhost' || host === '::1' || host.startsWith('127.')) {
+    throw new Error('web_fetch refuses loopback URLs');
+  }
+  if (/^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(host)) {
+    throw new Error('web_fetch refuses RFC1918 URLs');
+  }
+}
 
 let playwright = null;
 let stealthPlugin = null;
@@ -106,6 +133,14 @@ async function _searchWithFetch(query, maxResults) {
 // ─── Web Fetch (extract readable content) ────────────────────────────────────
 
 async function webFetch(url, maxChars = 5000) {
+  // SSRF guard — refuse URLs targeting metadata, RFC1918, or loopback
+  // unless the operator explicitly opted in. This blocks an LLM from
+  // tricking us into reading cloud metadata or local admin panels.
+  try {
+    _assertUrlSafe(String(url || ''));
+  } catch (e) {
+    return `Refused: ${e.message}`;
+  }
   // Try Playwright for JS-heavy pages
   const browser = await getBrowser();
   if (browser) {
@@ -131,7 +166,9 @@ async function _fetchWithBrowser(browser, url, maxChars) {
       return target.innerText || target.textContent || '';
     });
 
-    return text.slice(0, maxChars).trim();
+    // Sanitize: external page could embed ANSI escape sequences in
+    // copyable text snippets, or pasted secrets in error/log examples.
+    return sanitizeToolOutput(text).slice(0, maxChars).trim();
   } catch (e) {
     return `Failed to fetch ${url}: ${e.message}`;
   } finally {
@@ -144,7 +181,11 @@ async function _fetchSimple(url, maxChars) {
     const response = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SmallCode/0.4.0)' },
       timeout: 10000,
+      redirect: 'manual', // Don't auto-follow — a 30x to 169.254.169.254 would bypass the SSRF guard
     });
+    if (response.status >= 300 && response.status < 400) {
+      return `Refused: redirect to ${response.headers.get('location') || '(unknown)'} not followed`;
+    }
     const html = await response.text();
     // Strip HTML tags for readable text
     const text = html.replace(/<script[\s\S]*?<\/script>/gi, '')
@@ -152,10 +193,16 @@ async function _fetchSimple(url, maxChars) {
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    return text.slice(0, maxChars);
+    return sanitizeToolOutput(text).slice(0, maxChars);
   } catch (e) {
     return `Failed to fetch ${url}: ${e.message}`;
   }
 }
 
 module.exports = { webSearch, webFetch, closeBrowser, loadPlaywright };
+
+// Auto-close browser on process exit to prevent leaked Chromium processes.
+// This handles normal exit, SIGINT, and uncaught exceptions.
+process.on('exit', () => { if (browserInstance) { try { browserInstance.close(); } catch {} } });
+process.on('SIGINT', () => { if (browserInstance) { try { browserInstance.close(); } catch {} } process.exit(130); });
+process.on('SIGTERM', () => { if (browserInstance) { try { browserInstance.close(); } catch {} } process.exit(143); });

@@ -4,8 +4,10 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { createLineDemuxer } = require('../src/security/sanitize');
 
 let mcpProcess = null;
+let mcpDemuxer = null;
 let mcpRequestId = 1;
 
 function startCodeGraphMCP() {
@@ -43,12 +45,20 @@ function startCodeGraphMCP() {
   const child = spawn('node', [mcpPath], {
     stdio: ['pipe', 'pipe', 'pipe'],
     cwd: process.cwd(),
+    shell: false,
   });
 
   child.on('error', () => {});
-  child.on('exit', () => { mcpProcess = null; });
+  child.on('exit', () => {
+    mcpProcess = null;
+    if (mcpDemuxer) { try { mcpDemuxer.close(); } catch {} mcpDemuxer = null; }
+  });
 
   mcpProcess = child;
+  // Single shared line demuxer — replaces the per-request 'data' listener
+  // pattern that leaked listeners and could resolve a request with another
+  // request's response bytes under load.
+  mcpDemuxer = createLineDemuxer(child.stdout);
   return child;
 }
 
@@ -56,35 +66,33 @@ async function mcpCall(method, params = {}) {
   if (!mcpProcess) return null;
 
   return new Promise((resolve) => {
-    if (!mcpProcess || !mcpProcess.stdout || !mcpProcess.stdin) { resolve(null); return; }
+    if (!mcpProcess || !mcpProcess.stdout || !mcpProcess.stdin || !mcpDemuxer) { resolve(null); return; }
 
     const id = mcpRequestId++;
     const request = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
 
-    let buffer = '';
-    const onData = (chunk) => {
-      buffer += chunk.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const resp = JSON.parse(line);
-          if (resp.id === id) {
-            mcpProcess.stdout.off('data', onData);
-            resolve(resp.result || null);
-          }
-        } catch {}
-      }
+    let timer = null;
+    const finish = (val) => {
+      if (timer) clearTimeout(timer);
+      if (mcpDemuxer) mcpDemuxer.unregister(id);
+      resolve(val);
     };
 
-    mcpProcess.stdout.on('data', onData);
-    mcpProcess.stdin.write(request);
+    mcpDemuxer.register(id, (line) => {
+      try {
+        const resp = JSON.parse(line);
+        if (resp.id === id) finish(resp.result || null);
+      } catch { /* keep listening */ }
+    });
 
-    setTimeout(() => {
-      if (mcpProcess) mcpProcess.stdout.off('data', onData);
-      resolve(null);
-    }, 5000);
+    try {
+      mcpProcess.stdin.write(request);
+    } catch {
+      finish(null);
+      return;
+    }
+
+    timer = setTimeout(() => finish(null), 5000);
   });
 }
 
@@ -140,6 +148,7 @@ async function initCodeGraph(version) {
 }
 
 function killMCP() {
+  if (mcpDemuxer) { try { mcpDemuxer.close(); } catch {} mcpDemuxer = null; }
   if (mcpProcess) { mcpProcess.kill(); mcpProcess = null; }
 }
 

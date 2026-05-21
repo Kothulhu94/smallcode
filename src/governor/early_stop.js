@@ -17,15 +17,20 @@ class EarlyStopDetector {
    * Check streaming buffer for repetition loops.
    * Call this with the accumulated output during streaming.
    * Returns a StopSignal if repetition detected, null otherwise.
+   *
+   * Optimized: only inspects the TAIL of the buffer (last repetitionWindowChars)
+   * to avoid O(n²) scanning of the entire output on every token.
    */
   checkRepetition(buffer) {
     if (buffer.length < this.repetitionWindowChars * 2) return null;
 
+    // Only examine the tail — no need to re-scan the entire buffer
     const tail = buffer.slice(-this.repetitionWindowChars);
     for (const windowSize of [50, 80, 120]) {
       if (tail.length < windowSize * this.repetitionThreshold) continue;
 
-      const pattern = tail.slice(0, windowSize);
+      // Check if the last windowSize chars repeat multiple times in the tail
+      const pattern = tail.slice(-windowSize);
       let count = 0;
       let searchFrom = 0;
       while (true) {
@@ -33,6 +38,7 @@ class EarlyStopDetector {
         if (idx === -1) break;
         count++;
         searchFrom = idx + 1;
+        if (count >= this.repetitionThreshold) break; // early exit
       }
 
       if (count >= this.repetitionThreshold) {
@@ -119,9 +125,12 @@ Do NOT attempt another patch on this file.`,
 
   /**
    * Reset patch failure tracking (call at start of new user turn).
+   * Also clears the per-attempt counter so failure scoreboards don't grow
+   * unbounded when many distinct files are touched across a long session.
    */
   newTurn() {
     this.patchFailures = {};
+    this._patchAttempts = {};
   }
 }
 

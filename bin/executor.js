@@ -9,6 +9,13 @@
 
 const path = require('path');
 const fs = require('fs');
+const {
+  escapeShellArg,
+  buildCommand,
+  safeResolvePath,
+  sanitizeToolOutput,
+  stripAnsi: secStripAnsi,
+} = require('../src/security/sanitize');
 
 // ─── RTK (Rust Token Killer) integration ─────────────────────────────────────
 // Auto-rewrites supported bash commands through rtk for 60-90% token savings.
@@ -71,11 +78,9 @@ async function executeTool(name, args, ctx) {
 
   // Sanitize all string args — strip ANSI escape sequences the model may have
   // hallucinated into command strings (e.g. color codes in bash arguments).
-  // This prevents "find ... -\x1b[38;2;180mtype f" style corrupted commands.
-  function stripAnsi(str) {
-    if (typeof str !== 'string') return str;
-    return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-  }
+  // Uses the comprehensive ANSI stripper from src/security/sanitize.js so
+  // we cover OSC, DCS, 8-bit C1, and other escape forms too — not just CSI.
+  function stripAnsi(str) { return secStripAnsi(str); }
   if (args && typeof args === 'object') {
     for (const key of Object.keys(args)) {
       if (typeof args[key] === 'string') args[key] = stripAnsi(args[key]);
@@ -84,16 +89,19 @@ async function executeTool(name, args, ctx) {
 
   switch (name) {
     case 'read_file': {
-      // Normalize path (strip leading ./ and fix slashes)
-      let reqPath = args.path.replace(/^\.\//, '').replace(/^\.\\/, '');
-      const filePath = path.resolve(cwd, reqPath);
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { error: `read_file rejected: ${safe.reason}` };
+      const filePath = safe.fullPath;
       if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path} (checked: ${filePath})` };
       const content = fs.readFileSync(filePath, 'utf-8');
       const lines = content.split('\n');
       const start = (args.start_line || 1) - 1;
       const end = args.end_line || lines.length;
       const slice = lines.slice(start, end);
-      const numbered = slice.map((l, i) => `${String(start + i + 1).padStart(4)}│ ${l}`).join('\n');
+      // Sanitize before sending to the model: strip ANSI/control chars and
+      // redact any secrets the file may contain (e.g. .env, token files).
+      const safeSlice = slice.map(l => sanitizeToolOutput(l));
+      const numbered = safeSlice.map((l, i) => `${String(start + i + 1).padStart(4)}│ ${l}`).join('\n');
 
       // Feature 2: summarize large files (>200 lines, no line range requested)
       // This saves context by replacing the full file with signatures + key logic
@@ -103,7 +111,7 @@ async function executeTool(name, args, ctx) {
           if (summarizeFileCompiled) {
             const summary = await summarizeFileCompiled(args.path, content, 600);
             if (summary && summary.length > 50) {
-              return { result: `${args.path} (${lines.length} lines — summarized):\n${summary}` };
+              return { result: `${args.path} (${lines.length} lines — summarized):\n${sanitizeToolOutput(summary)}` };
             }
           }
         } catch {} // fall through to full content on any error
@@ -113,8 +121,9 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'write_file': {
-      let reqPath = args.path.replace(/^\.\//, '').replace(/^\.\\/, '');
-      const filePath = path.resolve(cwd, reqPath);
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { error: `write_file rejected: ${safe.reason}` };
+      const filePath = safe.fullPath;
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       const existed = fs.existsSync(filePath);
@@ -131,8 +140,9 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'patch': {
-      let reqPath = args.path.replace(/^\.\//, '').replace(/^\.\\/, '');
-      const filePath = path.resolve(cwd, reqPath);
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { error: `patch rejected: ${safe.reason}` };
+      const filePath = safe.fullPath;
       if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path} (checked: ${filePath})` };
       let content = fs.readFileSync(filePath, 'utf-8');
       const count = content.split(args.old_str).length - 1;
@@ -201,7 +211,11 @@ async function executeTool(name, args, ctx) {
       try {
         const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
         const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
-        const trimmed = output.length > maxOutput ? output.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + output.slice(-300) : output;
+        // Sanitize: strip ANSI/control chars + redact secrets so a command
+        // like `cat .env` or `printenv` doesn't leak API keys back into
+        // the model's context window.
+        const safeOutput = sanitizeToolOutput(output);
+        const trimmed = safeOutput.length > maxOutput ? safeOutput.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + safeOutput.slice(-300) : safeOutput;
         if (flags && flags.verbose && _fullscreenRef && trimmed.trim()) {
           const lines = trimmed.split('\n').slice(0, 10);
           for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
@@ -209,26 +223,38 @@ async function executeTool(name, args, ctx) {
         return { result: trimmed || '(no output)', command };
       } catch (e) {
         const output = (e.stdout || '') + (e.stderr || '');
+        const safeOutput = sanitizeToolOutput(output);
         const exitReason = (e.status === null || e.status === undefined) ? 'Timed out (killed after 30s)' : `Exit code ${e.status}`;
-        if (flags && flags.verbose && _fullscreenRef && output.trim()) {
-          const lines = output.split('\n').slice(0, 8);
+        if (flags && flags.verbose && _fullscreenRef && safeOutput.trim()) {
+          const lines = safeOutput.split('\n').slice(0, 8);
           for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
         }
-        return { result: output.slice(0, 2000) || e.message, error: exitReason, command };
+        return { result: safeOutput.slice(0, 2000) || sanitizeToolOutput(e.message || ''), error: exitReason, command };
       }
     }
 
     case 'search': {
       try {
-        const searchPath = args.path || '.';
-        const output = execSync(`rg --line-number --max-count 10 -C 1 "${args.pattern.replace(/"/g, '\\"')}" ${searchPath}`, { encoding: 'utf-8', timeout: 10000, cwd });
-        return { result: output.slice(0, 3000) };
+        // Resolve and contain the search path; default to cwd. This blocks
+        // attacks like {pattern: 'foo', path: '/etc'} that would let the
+        // model exfiltrate sensitive files outside the project.
+        const safePath = args.path
+          ? safeResolvePath(args.path, cwd)
+          : { ok: true, fullPath: '.' };
+        if (!safePath.ok) return { error: `search rejected: ${safePath.reason}` };
+        const cmd = buildCommand('rg', ['--line-number', '--max-count', '10', '-C', '1'], String(args.pattern || ''))
+          + ' ' + escapeShellArg(safePath.fullPath || '.');
+        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
+        return { result: sanitizeToolOutput(output).slice(0, 3000) };
       } catch { return { result: 'No matches found.' }; }
     }
 
     case 'find_files': {
       try {
-        const output = execSync(`rg --files --glob "${args.pattern}" --glob "!node_modules" --glob "!.git"`, { encoding: 'utf-8', timeout: 10000, cwd });
+        const cmd = 'rg --files --glob ' + escapeShellArg(String(args.pattern || ''))
+          + ' --glob ' + escapeShellArg('!node_modules')
+          + ' --glob ' + escapeShellArg('!.git');
+        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
         const files = output.trim().split('\n').filter(Boolean).slice(0, 30);
         return { result: files.length ? `Found ${files.length} files:\n${files.join('\n')}` : 'No files found.' };
       } catch { return { result: 'No files found.' }; }
@@ -260,11 +286,12 @@ async function executeTool(name, args, ctx) {
       const graphResult = await mcpCall('tools/call', { name: 'search_graph', arguments: { query: args.query, max_tokens: maxTokens } });
       if (graphResult && graphResult.content) {
         const text = graphResult.content.map(c => c.text || '').join('\n');
-        return { result: text || 'No results from code graph.' };
+        return { result: sanitizeToolOutput(text) || 'No results from code graph.' };
       }
       try {
-        const output = execSync(`rg --line-number --max-count 5 "${args.query.replace(/"/g, '\\"')}" .`, { encoding: 'utf-8', timeout: 10000, cwd });
-        return { result: output.slice(0, 3000) };
+        const cmd = buildCommand('rg', ['--line-number', '--max-count', '5'], String(args.query || '')) + ' .';
+        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
+        return { result: sanitizeToolOutput(output).slice(0, 3000) };
       } catch { return { result: 'No matches found in code graph or files.' }; }
     }
 
@@ -272,22 +299,32 @@ async function executeTool(name, args, ctx) {
       const graphResult = await mcpCall('tools/call', { name: 'explain_symbol', arguments: { symbol: args.symbol } });
       if (graphResult && graphResult.content) {
         const text = graphResult.content.map(c => c.text || '').join('\n');
-        return { result: text || `Symbol "${args.symbol}" not found in code graph.` };
+        return { result: sanitizeToolOutput(text) || `Symbol "${args.symbol}" not found in code graph.` };
       }
       try {
-        const output = execSync(`rg --line-number "\\b${args.symbol}\\b" . --max-count 10`, { encoding: 'utf-8', timeout: 10000, cwd });
-        return { result: `References to ${args.symbol}:\n${output.slice(0, 2000)}` };
+        // Restrict the symbol arg to identifier-safe characters before
+        // building the regex to defend against shell metacharacters and
+        // regex DoS via catastrophic backtracking.
+        const sym = String(args.symbol || '').slice(0, 200);
+        if (!/^[A-Za-z_][A-Za-z0-9_:.$-]*$/.test(sym)) {
+          return { result: `Symbol "${sym}" is not a valid identifier.` };
+        }
+        const cmd = 'rg --line-number ' + escapeShellArg(`\\b${sym}\\b`) + ' . --max-count 10';
+        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
+        return { result: sanitizeToolOutput(`References to ${sym}:\n${output.slice(0, 2000)}`) };
       } catch { return { result: `Symbol "${args.symbol}" not found.` }; }
     }
 
     case 'read_and_patch': {
-      const filePath = path.resolve(cwd, args.path);
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { error: `read_and_patch rejected: ${safe.reason}` };
+      const filePath = safe.fullPath;
       if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path}` };
       let content = fs.readFileSync(filePath, 'utf-8');
       const count = content.split(args.old_str).length - 1;
       if (count === 0) {
         const lines = content.split('\n').slice(0, 50);
-        const numbered = lines.map((l, i) => `${(i+1).toString().padStart(4)}| ${l}`).join('\n');
+        const numbered = lines.map((l, i) => `${(i+1).toString().padStart(4)}| ${sanitizeToolOutput(l)}`).join('\n');
         return { error: `old_str not found. File content:\n${numbered}` };
       }
       if (count > 1) return { error: `old_str matches ${count} locations. Be more specific.` };
@@ -299,7 +336,9 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'create_and_run': {
-      const filePath = path.resolve(cwd, args.path);
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { error: `create_and_run rejected: ${safe.reason}` };
+      const filePath = safe.fullPath;
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(filePath, args.content);
@@ -343,14 +382,22 @@ async function executeTool(name, args, ctx) {
 
     case 'find_and_read': {
       try {
-        const found = execSync(`rg --files --glob "${args.pattern}" --glob "!node_modules" --glob "!.git"`, { encoding: 'utf-8', timeout: 10000, cwd });
+        const cmd = 'rg --files --glob ' + escapeShellArg(String(args.pattern || ''))
+          + ' --glob ' + escapeShellArg('!node_modules')
+          + ' --glob ' + escapeShellArg('!.git');
+        const found = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
         const files = found.trim().split('\n').filter(Boolean);
         if (files.length === 0) return { result: 'No files found matching: ' + args.pattern };
         const target = files[0];
-        const content = fs.readFileSync(path.resolve(cwd, target), 'utf-8');
+        // Re-validate the target through safeResolvePath. ripgrep --files
+        // can in theory follow symlinks outside cwd; we want to refuse
+        // serving up content from outside the project.
+        const safeTarget = safeResolvePath(target, cwd);
+        if (!safeTarget.ok) return { error: `find_and_read rejected: ${safeTarget.reason}` };
+        const content = fs.readFileSync(safeTarget.fullPath, 'utf-8');
         const maxLines = args.read_lines || 50;
         const lines = content.split('\n').slice(0, maxLines);
-        const numbered = lines.map((l, i) => `${(i+1).toString().padStart(4)}| ${l}`).join('\n');
+        const numbered = lines.map((l, i) => `${(i+1).toString().padStart(4)}| ${sanitizeToolOutput(l)}`).join('\n');
         let output = `Found ${files.length} files. Reading ${target} (${content.split('\n').length} lines):\n${numbered}`;
         if (files.length > 1) output += `\n\nOther matches: ${files.slice(1, 5).join(', ')}`;
         return { result: output };
@@ -359,9 +406,16 @@ async function executeTool(name, args, ctx) {
 
     case 'search_and_read': {
       try {
-        const readCtx = args.read_context || 10;
-        const output = execSync(`rg --line-number -C ${readCtx} --max-count 3 "${args.pattern.replace(/"/g, '\\"')}" . --glob "!node_modules" --glob "!.git"`, { encoding: 'utf-8', timeout: 10000, cwd });
-        return { result: output.slice(0, 4000) || 'No matches.' };
+        const readCtx = Number.isInteger(args.read_context) && args.read_context > 0 && args.read_context < 200
+          ? args.read_context
+          : 10;
+        const cmd = buildCommand(
+          'rg',
+          ['--line-number', '-C', String(readCtx), '--max-count', '3'],
+          String(args.pattern || ''),
+        ) + ' . --glob ' + escapeShellArg('!node_modules') + ' --glob ' + escapeShellArg('!.git');
+        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
+        return { result: sanitizeToolOutput(output).slice(0, 4000) || 'No matches.' };
       } catch { return { result: 'No matches found for: ' + args.pattern }; }
     }
 
@@ -384,11 +438,13 @@ async function executeTool(name, args, ctx) {
       const timeout = (args.timeout || 30) * 1000;
       try {
         const output = execSync(args.command, { encoding: 'utf-8', timeout, cwd, maxBuffer: 1024*1024 });
-        return { result: output.slice(0, 3000) || '(completed with no output)', command: args.command };
+        return { result: sanitizeToolOutput(output).slice(0, 3000) || '(completed with no output)', command: args.command };
       } catch (e) {
         const errOut = (e.stdout || '') + (e.stderr || e.message || '');
-        const exitReason = (e.status === null || e.status === undefined) ? 'Timed out (killed after 30s)' : `Exit code ${e.status || 1}`;
-        return { result: `${exitReason.toUpperCase()} — FAILED:\n${errOut.slice(0, 2500)}`, error: `Command failed: ${exitReason}`, command: args.command };
+        const exitReason = (e.status === null || e.status === undefined)
+          ? `Timed out (killed after ${args.timeout || 30}s)`
+          : `Exit code ${e.status || 1}`;
+        return { result: `${exitReason.toUpperCase()} — FAILED:\n${sanitizeToolOutput(errOut).slice(0, 2500)}`, error: `Command failed: ${exitReason}`, command: args.command };
       }
     }
 
@@ -399,13 +455,25 @@ async function executeTool(name, args, ctx) {
       if (name === 'memory_load') {
         const task = args.task || '';
         const maxTokens = args.max_tokens || 2000;
-        const { objects, tokens_used } = memoryStore.loadForTask(task, maxTokens);
+        // Handle both budget-aware-mcp format ({objects, tokens_used}) and
+        // fallback MemoryStore format (plain array).
+        const raw = memoryStore.loadForTask(task, maxTokens);
+        const objects = Array.isArray(raw) ? raw : (raw?.objects || []);
+        const tokens_used = Array.isArray(raw) ? objects.length * 50 : (raw?.tokens_used || 0);
         if (objects.length === 0) return { result: 'No relevant memory found.' };
         const formatted = objects.map(o => `[${o.type}] ${o.title}: ${o.content}`).join('\n\n');
         return { result: `Loaded ${objects.length} memories (${tokens_used} tokens):\n\n${formatted}` };
       }
       if (name === 'memory_remember') {
-        const obj = memoryStore.remember({ type: args.type || 'context', title: args.title || '', content: args.content || '', tags: args.tags || [], symbols: args.symbols || [], files: args.files || [] });
+        // Support both the budget-aware-mcp API (object arg) and fallback (positional).
+        let obj;
+        if (typeof memoryStore.remember === 'function' && memoryStore.remember.length >= 3) {
+          // Fallback MemoryStore: remember(type, title, content, opts)
+          obj = memoryStore.remember(args.type || 'context', args.title || '', args.content || '', { tags: args.tags || [] });
+        } else {
+          // budget-aware-mcp: remember({ type, title, content, tags, ... })
+          obj = memoryStore.remember({ type: args.type || 'context', title: args.title || '', content: args.content || '', tags: args.tags || [], symbols: args.symbols || [], files: args.files || [] });
+        }
         if (obj.duplicate) return { result: `Already known (confirmed existing: ${obj.existing_id})` };
         return { result: `Remembered [${obj.type}] "${obj.title}" (${obj.id})` };
       }
@@ -422,24 +490,36 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'bone_compile': {
-      const bonePath = path.resolve(cwd, args.path);
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { error: `bone_compile rejected: ${safe.reason}` };
+      const bonePath = safe.fullPath;
       if (!fs.existsSync(bonePath)) return { error: `File not found: ${args.path}` };
       if (!args.path.endsWith('.bone')) return { error: `Expected a .bone file, got: ${args.path}` };
-      const target = args.target || 'express';
+      // Restrict the target string to a known whitelist — it gets passed
+      // straight to the compiler CLI, so an unrestricted value is a
+      // potential injection vector.
+      const allowedTargets = new Set(['express', 'nakama', 'prisma', 'sqlite']);
+      const target = String(args.target || 'express');
+      if (!allowedTargets.has(target)) {
+        return { error: `bone_compile: invalid target. Allowed: ${[...allowedTargets].join(', ')}` };
+      }
       const compilerPaths = [path.resolve(__dirname, '..', 'node_modules', 'bonescript-compiler', 'dist', 'cli.js'), path.resolve(__dirname, '..', '..', 'BoneScript', 'compiler', 'dist', 'cli.js')];
       let compiler = null;
       for (const cp of compilerPaths) { if (fs.existsSync(cp)) { compiler = cp; break; } }
       if (!compiler) return { error: 'BoneScript compiler not found.' };
       try {
-        const output = execSync(`node "${compiler}" compile "${bonePath}" --target ${target}`, { encoding: 'utf-8', timeout: 30000, cwd });
-        return { result: `Compiled ${args.path} → output/\n${output.slice(0, 2000)}`, action: 'Created', path: 'output/' };
+        const cmd = 'node ' + escapeShellArg(compiler) + ' compile ' + escapeShellArg(bonePath) + ' --target ' + escapeShellArg(target);
+        const output = execSync(cmd, { encoding: 'utf-8', timeout: 30000, cwd });
+        return { result: `Compiled ${args.path} → output/\n${sanitizeToolOutput(output).slice(0, 2000)}`, action: 'Created', path: 'output/' };
       } catch (e) {
-        return { error: `BoneScript compile failed:\n${((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000)}` };
+        return { error: `BoneScript compile failed:\n${sanitizeToolOutput((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000)}` };
       }
     }
 
     case 'bone_check': {
-      const bonePath = path.resolve(cwd, args.path);
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { error: `bone_check rejected: ${safe.reason}` };
+      const bonePath = safe.fullPath;
       if (!fs.existsSync(bonePath)) return { error: `File not found: ${args.path}` };
       if (!args.path.endsWith('.bone')) return { error: `Expected a .bone file, got: ${args.path}` };
       const compilerPaths = [path.resolve(__dirname, '..', 'node_modules', 'bonescript-compiler', 'dist', 'cli.js'), path.resolve(__dirname, '..', '..', 'BoneScript', 'compiler', 'dist', 'cli.js')];
@@ -447,10 +527,11 @@ async function executeTool(name, args, ctx) {
       for (const cp of compilerPaths) { if (fs.existsSync(cp)) { compiler = cp; break; } }
       if (!compiler) return { error: 'BoneScript compiler not found.' };
       try {
-        const output = execSync(`node "${compiler}" check "${bonePath}"`, { encoding: 'utf-8', timeout: 15000, cwd });
-        return { result: output.trim() || '✓ No errors found.' };
+        const cmd = 'node ' + escapeShellArg(compiler) + ' check ' + escapeShellArg(bonePath);
+        const output = execSync(cmd, { encoding: 'utf-8', timeout: 15000, cwd });
+        return { result: sanitizeToolOutput(output).trim() || '✓ No errors found.' };
       } catch (e) {
-        return { error: `BoneScript validation errors:\n${((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000)}` };
+        return { error: `BoneScript validation errors:\n${sanitizeToolOutput((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000)}` };
       }
     }
 

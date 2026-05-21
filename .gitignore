@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# E2E test artifacts (generated, not committed)
+.e2e-test/
+
 # SmallCode runtime state
 .smallcode/cache/
 .smallcode/traces/
