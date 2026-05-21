@@ -63,6 +63,12 @@ const TEMPLATES = {
   // Cached 30m by message hash so repeated identical prompts are instant.
   intent_clarifier: (user_message) =>
     `Is this coding task request clear enough to act on, or is it too vague?\n\nA request is VAGUE if it lacks a specific target (e.g. "fix it", "make it better", "do the thing").\nA request is CLEAR if it specifies what to do, even if brief (e.g. "run tests", "fix the null check in auth.js", "add logging").\n\nReply with ONLY one word: "clear" or "vague"\n\nRequest: "${user_message.replace(/"/g, '\\"').slice(0, 300)}"`,
+
+  // MarrowScript Feature #2: commit_message
+  // Generates a conventional commit message. Cached 1h by task hash.
+  // Validates format: must start with type: prefix, under 72 chars.
+  commit_message: (task, changed_files) =>
+    `Generate a git commit message for this change.\n\nTask: ${task.slice(0, 200)}\nChanged files: ${changed_files.slice(0, 300)}\n\nRules:\n- Start with a type: feat|fix|docs|refactor|test|chore|style\n- Format: type: short description (under 72 chars total)\n- No period at end, no quotes\n- Be specific about what changed\n\nReply with ONLY the commit message, nothing else.`,
 };
 
 // ─── Core fetch helper ────────────────────────────────────────────────────────
@@ -125,7 +131,8 @@ async function callPrompt(name, input, ctx) {
   const rendered = tmpl(...Object.values(input));
   const cacheKey = _deriveKey(name, rendered);
   const ttlMs = name === 'summarize_file' ? 3600000 :
-                name === 'intent_clarifier' ? 1800000 : // 30m — per MarrowScript declaration
+                name === 'intent_clarifier' ? 1800000 : // 30m
+                name === 'commit_message' ? 3600000 :   // 1h — per MarrowScript declaration
                 600000;
 
   const hit = _cacheGet(cacheKey);
@@ -144,6 +151,7 @@ const PROMPTS = {
   summarize_file: (input, ctx) => callPrompt('summarize_file', input, ctx),
   validate_edit: (input, ctx) => callPrompt('validate_edit', input, ctx),
   intent_clarifier: (input, ctx) => callPrompt('intent_clarifier', input, ctx),
+  commit_message: (input, ctx) => callPrompt('commit_message', input, ctx),
 };
 
 function getPrompt(name) {

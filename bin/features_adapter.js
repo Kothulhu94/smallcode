@@ -157,6 +157,40 @@ async function retrieveContext(userMessage, mcpCall, maxFiles = 8) {
 }
 
 /**
+ * Generate a conventional commit message for the auto-commit feature.
+ * MarrowScript Feature #2: replaces the hand-rolled string truncation in
+ * the auto-commit block of runAgentLoop.
+ *
+ * @param {string} task         - The user's task description
+ * @param {string[]} changedFiles - Files modified this turn
+ * @returns {Promise<string>} commit message string
+ */
+async function generateCommitMessage(task, changedFiles) {
+  const prompts = _getPrompts();
+  const fallback = `smallcode: ${task.slice(0, 50).replace(/[\n\r"'`$\\]/g, ' ').trim()}`;
+  if (!prompts) return fallback;
+  try {
+    const traceId = require('crypto').randomUUID();
+    const result = await prompts.callPrompt('commit_message', {
+      task: task,
+      changed_files: changedFiles.slice(0, 10).join(', '),
+    }, { trace_id: traceId });
+    const msg = String(result).trim()
+      .replace(/^["']|["']$/g, '')  // strip surrounding quotes
+      .replace(/\.$/, '')            // strip trailing period
+      .slice(0, 72);
+    // Validate conventional commit format
+    if (/^(feat|fix|docs|refactor|test|chore|style|ci|perf|build|revert)(\(.+\))?:/.test(msg)) {
+      return msg;
+    }
+    // Model didn't follow the format — use its output as the description with a generic prefix
+    return `chore: ${msg.slice(0, 65)}`;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
  * Check if a user message is too vague to act on.
  * MarrowScript Feature #1: compiled intent_clarifier replaces hand-rolled regex
  * in src/session/clarify.js. Falls back to the regex version if the model is
@@ -228,5 +262,6 @@ module.exports = {
   retrieveContext,
   validateEditCompiled,
   checkNeedsClarification,
+  generateCommitMessage,
   isFeaturesAvailable,
 };
