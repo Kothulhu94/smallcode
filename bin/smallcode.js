@@ -485,14 +485,18 @@ async function runAgentLoop(userMessage, config) {
   // Clarification loop — detect vague prompts before wasting tool calls.
   // MarrowScript Feature #1: uses compiled intent_clarifier (LLM-based, cached 30m)
   // with automatic fallback to regex when the model is unavailable.
+  // Only fires on short messages (< 80 chars) — long messages are almost never vague
+  // and we don't want to add 2s latency to every detailed task description.
   const { getClarificationInstruction } = require('../src/session/clarify');
   let _needsClarification = false;
-  try {
-    const { checkNeedsClarification } = require('./features_adapter');
-    _needsClarification = await checkNeedsClarification(userMessage);
-  } catch {
-    const { needsClarification } = require('../src/session/clarify');
-    _needsClarification = needsClarification(userMessage);
+  if (userMessage.length < 80) {
+    try {
+      const { checkNeedsClarification } = require('./features_adapter');
+      _needsClarification = await checkNeedsClarification(userMessage);
+    } catch {
+      const { needsClarification } = require('../src/session/clarify');
+      _needsClarification = needsClarification(userMessage);
+    }
   }
   if (_needsClarification) {
     // Inject clarification instruction into this turn only

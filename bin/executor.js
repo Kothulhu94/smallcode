@@ -212,6 +212,8 @@ async function executeTool(name, args, ctx) {
         return { error: `append_file: file not found: ${args.path}. Create it first with write_file.` };
       }
       const before = fs.readFileSync(filePath, 'utf-8');
+      // Snapshot for auto-rollback (Feature 9) — record state before appending
+      try { getSnapshotManager({ workdir: cwd }).note(filePath, before); } catch {}
       // Add newline separator if file doesn't end with one
       const sep = before.length > 0 && !before.endsWith('\n') ? '\n' : '';
       const newContent = before + sep + args.content;
@@ -473,7 +475,11 @@ async function executeTool(name, args, ctx) {
       const filePath = safe.fullPath;
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(filePath, args.content);
+      // Apply the same 8KB guard as write_file — llama.cpp can't parse larger tool calls
+      if (args.content && args.content.length > 8000) {
+        return { error: `create_and_run: content too large (${args.content.split('\n').length} lines). Use write_file (skeleton) + append_file (sections) + bash to run.` };
+      }
+      fs.writeFileSync(filePath, args.content || '');
       const lines = args.content.split('\n').length;
       let output = `Created ${args.path} (${lines} lines)`;
       let cmdError = false;
