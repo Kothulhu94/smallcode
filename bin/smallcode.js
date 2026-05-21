@@ -482,9 +482,19 @@ async function runAgentLoop(userMessage, config) {
     // Still proceed — rate limiting is advisory for local use
   }
 
-  // Clarification loop — detect vague prompts before wasting tool calls
-  const { needsClarification, getClarificationInstruction } = require('../src/session/clarify');
-  if (needsClarification(userMessage)) {
+  // Clarification loop — detect vague prompts before wasting tool calls.
+  // MarrowScript Feature #1: uses compiled intent_clarifier (LLM-based, cached 30m)
+  // with automatic fallback to regex when the model is unavailable.
+  const { getClarificationInstruction } = require('../src/session/clarify');
+  let _needsClarification = false;
+  try {
+    const { checkNeedsClarification } = require('./features_adapter');
+    _needsClarification = await checkNeedsClarification(userMessage);
+  } catch {
+    const { needsClarification } = require('../src/session/clarify');
+    _needsClarification = needsClarification(userMessage);
+  }
+  if (_needsClarification) {
     // Inject clarification instruction into this turn only
     conversationHistory.push({ role: 'user', content: userMessage });
     conversationHistory.push({ role: 'system', content: getClarificationInstruction() });
@@ -1553,7 +1563,9 @@ function buildCompactSystemPrompt(taskType, messages) {
   let prompt = `You are SmallCode, a coding agent. Working directory: ${process.cwd()}
 OS: ${os}${osHint}${bootstrapLine}
 
-Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it. If asked about the project, read README.md or relevant files — do not answer from the workspace context line above. For files over 100 lines, always use patch (search-and-replace) rather than write_file — large write_file calls frequently corrupt due to JSON encoding limits.`;
+Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it. If asked about the project, read README.md or relevant files — do not answer from the workspace context line above.
+
+CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. llama.cpp's JSON parser crashes on larger tool calls. For any file over 60 lines: (1) write_file with just the skeleton (imports + empty stubs), then (2) use multiple patch calls to fill in each function/section. Never put more than 60 lines in a single write_file content field.`;
 
   // Only add tool-use instructions for tasks that need tools
   if (taskType !== 'explanation') {

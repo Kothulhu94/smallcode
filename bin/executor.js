@@ -164,8 +164,19 @@ async function executeTool(name, args, ctx) {
       if (!args.content && args.content !== '') {
         return { error: `write_file: content is missing or undefined for ${args.path}` };
       }
-      if (args.content.length > 200 * 1024) {
-        return { error: `write_file: content too large (${Math.round(args.content.length/1024)}KB > 200KB limit). Use patch for large edits or split into multiple smaller files.` };
+      // Content length guard — llama.cpp JSON parser fails at ~13k chars in tool_call arguments.
+      // We enforce a limit well below that. For new large files, the model must use a
+      // skeleton + patch strategy (instructed in the system prompt).
+      const MAX_CONTENT_CHARS = 8000; // ~200 lines of dense code, well under llama.cpp's limit
+      if (args.content.length > MAX_CONTENT_CHARS) {
+        const lineCount = args.content.split('\n').length;
+        return {
+          error: `write_file: content too large (${lineCount} lines / ${Math.round(args.content.length/1024)}KB). ` +
+            `llama.cpp cannot parse tool calls larger than ~8KB. ` +
+            `Strategy: write a skeleton file first (imports + empty function stubs), ` +
+            `then use multiple patch calls to fill in each section. ` +
+            `Keep each write_file under 60 lines.`,
+        };
       }
       const existed = fs.existsSync(filePath);
       const oldContent = existed ? fs.readFileSync(filePath, 'utf-8') : null;
@@ -183,6 +194,33 @@ async function executeTool(name, args, ctx) {
         _fullscreenRef.addDiff(args.path, preview + '\n...', newPreview + '\n...', 1);
       }
       return { result: `${action} ${args.path} (${lineCount} lines)`, action, path: args.path, lines: lineCount };
+    }
+
+    case 'append_file': {
+      // append_file: lets the model build large files in chunks, avoiding
+      // llama.cpp's ~13KB JSON parse limit that breaks large write_file calls.
+      const safe = safeResolvePath(args.path, cwd);
+      if (!safe.ok) return { error: `append_file rejected: ${safe.reason}` };
+      const filePath = safe.fullPath;
+      if (!args.content && args.content !== '') {
+        return { error: 'append_file: content is missing' };
+      }
+      if (args.content.length > 8000) {
+        return { error: `append_file: chunk too large (${Math.round(args.content.length/1024)}KB). Keep each append under 60 lines.` };
+      }
+      if (!fs.existsSync(filePath)) {
+        return { error: `append_file: file not found: ${args.path}. Create it first with write_file.` };
+      }
+      const before = fs.readFileSync(filePath, 'utf-8');
+      // Add newline separator if file doesn't end with one
+      const sep = before.length > 0 && !before.endsWith('\n') ? '\n' : '';
+      const newContent = before + sep + args.content;
+      fs.writeFileSync(filePath, newContent);
+      try { getFileStateTracker().recordWrite(filePath, newContent); } catch {}
+      try { getReadTracker().recordWrite(filePath, cwd); } catch {}
+      const totalLines = newContent.split('\n').length;
+      const addedLines = args.content.split('\n').length;
+      return { result: `Appended ${addedLines} lines to ${args.path} (now ${totalLines} lines total)`, action: 'Appended', path: args.path };
     }
 
     case 'patch': {
