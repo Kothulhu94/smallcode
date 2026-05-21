@@ -64,11 +64,33 @@ const TEMPLATES = {
   intent_clarifier: (user_message) =>
     `Is this coding task request clear enough to act on, or is it too vague?\n\nA request is VAGUE if it lacks a specific target (e.g. "fix it", "make it better", "do the thing").\nA request is CLEAR if it specifies what to do, even if brief (e.g. "run tests", "fix the null check in auth.js", "add logging").\n\nReply with ONLY one word: "clear" or "vague"\n\nRequest: "${user_message.replace(/"/g, '\\"').slice(0, 300)}"`,
 
-  // MarrowScript Feature #2: commit_message
+  // MarrowScript Feature #3: extract_plan
+  // Replaces regex-based parsePlan() with an LLM call that handles plans
+  // embedded in prose, unusual formats, and non-standard numbering.
+  // Cached 10m. Falls back to regex parser on failure.
+  extract_plan: (response) =>
+    `Extract the numbered steps from this text. The text may contain a plan, todo list, or step-by-step instructions in any format.\n\nRules:\n- Return ONLY a JSON array of strings, one per step\n- Maximum 8 steps, minimum 2\n- Each step should be a short action phrase (under 100 chars)\n- If no clear plan exists, return: []\n\nText:\n${response.slice(0, 2000)}\n\nJSON array of steps:`,
   // Generates a conventional commit message. Cached 1h by task hash.
   // Validates format: must start with type: prefix, under 72 chars.
   commit_message: (task, changed_files) =>
     `Generate a git commit message for this change.\n\nTask: ${task.slice(0, 200)}\nChanged files: ${changed_files.slice(0, 300)}\n\nRules:\n- Start with a type: feat|fix|docs|refactor|test|chore|style\n- Format: type: short description (under 72 chars total)\n- No period at end, no quotes\n- Be specific about what changed\n\nReply with ONLY the commit message, nothing else.`,
+
+  // MarrowScript Rank 4: error_diagnosis
+  // Structured analysis of bash/command failures. Cached 5m.
+  // Returns JSON: { type, file, line, suggestion }
+  error_diagnosis: (command, stderr, exit_code) =>
+    `Analyze this command failure.\n\nCommand: ${command}\nExit code: ${exit_code}\nOutput:\n${stderr.slice(0, 1500)}\n\nReturn JSON only: {"type":"syntax|runtime|permission|notfound|timeout|unknown","file":"<path or null>","line":<number or null>,"suggestion":"<one line fix>"}`,
+
+  // MarrowScript Rank 5: decompose_task
+  // Strategy selector for tasks that fail repeatedly. Cached 5m.
+  // Returns JSON: { strategy, reason, instruction }
+  decompose_task: (task, errors, file_context) =>
+    `A coding task has failed after multiple attempts. Suggest a decomposition strategy.\n\nTask: ${task.slice(0, 300)}\nErrors: ${errors.slice(0, 500)}\nFile context: ${file_context.slice(0, 1000)}\n\nReturn JSON: {"strategy":"split_file|one_error_at_a_time|rewrite_section|extract_function","reason":"<why>","instruction":"<2-3 sentence instruction for the model>"}`,
+
+  // MarrowScript Rank 7: semantic_merge
+  // Recovers from patch failures where old_str no longer exists. TTL 1m (content-specific, no caching benefit).
+  semantic_merge: (file, intended_change, current_content) =>
+    `A patch failed because the target text changed. Merge the intended change into the current file.\n\nFile: ${file}\nIntended change description: ${intended_change.slice(0, 500)}\nCurrent content:\n${current_content.slice(0, 3000)}\n\nReturn ONLY the complete corrected file content, no explanation.`,
 };
 
 // ─── Core fetch helper ────────────────────────────────────────────────────────
@@ -131,8 +153,12 @@ async function callPrompt(name, input, ctx) {
   const rendered = tmpl(...Object.values(input));
   const cacheKey = _deriveKey(name, rendered);
   const ttlMs = name === 'summarize_file' ? 3600000 :
-                name === 'intent_clarifier' ? 1800000 : // 30m
-                name === 'commit_message' ? 3600000 :   // 1h — per MarrowScript declaration
+                name === 'intent_clarifier' ? 1800000 :
+                name === 'commit_message' ? 3600000 :
+                name === 'extract_plan' ? 600000 :      // 10m
+                name === 'error_diagnosis' ? 300000 :   // 5m
+                name === 'decompose_task' ? 300000 :    // 5m
+                name === 'semantic_merge' ? 60000 :     // 1m — content-specific, minimal cache value
                 600000;
 
   const hit = _cacheGet(cacheKey);
@@ -152,6 +178,10 @@ const PROMPTS = {
   validate_edit: (input, ctx) => callPrompt('validate_edit', input, ctx),
   intent_clarifier: (input, ctx) => callPrompt('intent_clarifier', input, ctx),
   commit_message: (input, ctx) => callPrompt('commit_message', input, ctx),
+  extract_plan: (input, ctx) => callPrompt('extract_plan', input, ctx),
+  error_diagnosis: (input, ctx) => callPrompt('error_diagnosis', input, ctx),
+  decompose_task: (input, ctx) => callPrompt('decompose_task', input, ctx),
+  semantic_merge: (input, ctx) => callPrompt('semantic_merge', input, ctx),
 };
 
 function getPrompt(name) {

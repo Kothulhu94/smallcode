@@ -896,7 +896,8 @@ async function runAgentLoop(userMessage, config) {
       // textual content, capture it now so subsequent turns can re-inject it.
       try {
         if (_planTracker && _planTracker.needsPlan() && message.content) {
-          if (_planTracker.ingestResponse(message.content)) {
+          // MarrowScript Feature #3: use async LLM-based plan extractor with regex fallback
+          if (await _planTracker.ingestResponseAsync(message.content)) {
             if (_fullscreenRef) _fullscreenRef.addTool('plan', 'ok', `${_planTracker.plan.length} steps`);
             // Remove the one-shot instruction now that we have the plan.
             // It must not persist in history or the model will keep trying
@@ -987,6 +988,15 @@ async function runAgentLoop(userMessage, config) {
         // Track edited files for reviewer agent (Feature #18)
         if ((toolName === 'write_file' || toolName === 'patch') && !result.error && toolArgs.path) {
           _editedFilesThisTurn.push(toolArgs.path);
+          // MarrowScript Rank 6: inject multi-file coordination header when editing 3+ files
+          if (_editedFilesThisTurn.length >= 3) {
+            try {
+              const { coordinateMultiFileEdit } = require('../src/compiled/features/multi_file_edit');
+              const { getSnapshotManager } = require('../src/session/snapshot');
+              const snap = getSnapshotManager({ workdir: process.cwd() });
+              await coordinateMultiFileEdit(userMessage, _editedFilesThisTurn, conversationHistory, executeTool, snap);
+            } catch {} // never block on coordination errors
+          }
         }
 
         // Trust decay (Feature 13): track consecutive failures per tool.
@@ -1033,8 +1043,6 @@ async function runAgentLoop(userMessage, config) {
           // Feature 6: self-critique the edit before running lint
           try {
             if (validateEditCompiled && filePath) {
-              const fs = require('fs');
-              const path = require('path');
               const written = fs.existsSync(path.resolve(process.cwd(), filePath))
                 ? fs.readFileSync(path.resolve(process.cwd(), filePath), 'utf-8')
                 : (toolArgs.content || '');
@@ -1114,10 +1122,24 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
             } else {
               // DECOMPOSE instead of giving up — break the problem into chunks
               improvementAttempts[filePath] = 0;
-              const { pickDecomposeStrategy } = require('./governor');
               let fileContent = '';
               try { fileContent = fs.readFileSync(path.resolve(process.cwd(), filePath), 'utf-8'); } catch {}
-              const strategy = pickDecomposeStrategy(fileContent, validation.errors, filePath);
+
+              // MarrowScript Rank 5: try LLM-based decompose strategy first
+              let strategy;
+              try {
+                const { decomposeTask } = require('./features_adapter');
+                if (decomposeTask) {
+                  const errStr = validation.errors.join('\n');
+                  const decomposeResult = await decomposeTask(userMessage, errStr, fileContent.slice(0, 1000));
+                  if (decomposeResult) strategy = { type: decomposeResult.strategy, reason: decomposeResult.reason, instruction: decomposeResult.instruction };
+                }
+              } catch {}
+              // Fall back to governor's regex strategy
+              if (!strategy) {
+                const { pickDecomposeStrategy } = require('./governor');
+                strategy = pickDecomposeStrategy(fileContent, validation.errors, filePath);
+              }
               
               // Track decompose attempts — if this is the 2nd decompose, escalate instead
               if (!improvementAttempts[`__decompose:${filePath}`]) improvementAttempts[`__decompose:${filePath}`] = 0;
@@ -1271,9 +1293,21 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
             } else {
               // First bash decompose — try local model with new strategy
               improvementAttempts['__bash'] = 0;
-              const { pickDecomposeStrategy } = require('./governor');
-              const errors = [(result.result || '').slice(0, 300)];
-              const strategy = pickDecomposeStrategy('', errors, toolArgs.command || '');
+              // MarrowScript Rank 5: try LLM-based decompose strategy first
+              let strategy;
+              try {
+                const { decomposeTask } = require('./features_adapter');
+                if (decomposeTask) {
+                  const bashErrors = [(result.result || '').slice(0, 300)].join('\n');
+                  const decomposeResult = await decomposeTask(userMessage, bashErrors, toolArgs.command || '');
+                  if (decomposeResult) strategy = { type: decomposeResult.strategy, reason: decomposeResult.reason, instruction: decomposeResult.instruction };
+                }
+              } catch {}
+              if (!strategy) {
+                const { pickDecomposeStrategy } = require('./governor');
+                const errors = [(result.result || '').slice(0, 300)];
+                strategy = pickDecomposeStrategy('', errors, toolArgs.command || '');
+              }
               console.log(`  \x1b[33m◇ DECOMPOSE: Command keeps failing. Changing approach.\x1b[0m`);
               conversationHistory.push({
                 role: 'user',
@@ -1387,7 +1421,8 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       // Plan extraction from a tool-less response (model planned without tools)
       try {
         if (_planTracker && _planTracker.needsPlan()) {
-          if (_planTracker.ingestResponse(message.content)) {
+          // MarrowScript Feature #3: async LLM extractor with regex fallback
+          if (await _planTracker.ingestResponseAsync(message.content)) {
             if (_fullscreenRef) _fullscreenRef.addTool('plan', 'ok', `${_planTracker.plan.length} steps`);
             // Remove the one-shot instruction from history (same as tool-call path)
             if (_planInstructionIdx >= 0 && _planInstructionIdx < conversationHistory.length) {
@@ -1818,6 +1853,18 @@ async function chatCompletion(config, messages) {
       body.model = getExecutorModel('', config); // task already classified at loop start
     } catch {}
 
+    // MarrowScript Rank 8: adaptive model routing
+    // Override body.model when failure rate warrants a stronger model.
+    try {
+      const { getAdaptiveRouter } = require('../src/model/adaptive_router');
+      const router = getAdaptiveRouter();
+      const selected = router.selectModel(config);
+      if (selected.model && selected.model !== body.model) {
+        if (_fullscreenRef) _fullscreenRef.addTool('adaptive', 'ok', `→ ${selected.model} (high failure rate)`);
+        body.model = selected.model;
+      }
+    } catch {}
+
     // Apply thinking budget for reasoning models (Qwen3, DeepSeek R1, Claude with
     // thinking, GPT-5 reasoning). Without this, a small reasoning model can spend
     // 8000 tokens "thinking" about a trivial rename. Defaults to 2000 tokens;
@@ -1950,6 +1997,8 @@ async function chatCompletion(config, messages) {
       const errDetail = err.slice(0, 200);
       console.log(`  \x1b[31m✗ API error ${response.status}: ${errDetail}\x1b[0m`);
       if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `HTTP ${response.status}: ${errDetail.slice(0, 80)}`);
+      // MarrowScript Rank 8: record failure for adaptive routing
+      try { const { getAdaptiveRouter } = require('../src/model/adaptive_router'); getAdaptiveRouter().recordCall(body.model || config.model.name, false); } catch {}
       return null;
     }
 
@@ -1967,6 +2016,12 @@ async function chatCompletion(config, messages) {
         try { chargeBudget('run_turn', { tokens: (data.usage.prompt_tokens || 0) + (data.usage.completion_tokens || 0) }); } catch {}
       }
     }
+
+    // MarrowScript Rank 8: record successful call for adaptive routing
+    try {
+      const { getAdaptiveRouter } = require('../src/model/adaptive_router');
+      getAdaptiveRouter().recordCall(body.model || config.model.name, true);
+    } catch {}
 
     // Auto-save session periodically
     if (sessionStore) {

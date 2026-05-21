@@ -74,6 +74,20 @@ const CATEGORIES = {
       { re: /\b(show|read|display|cat)\b/i, w: -2.0 },
     ],
   },
+  code_intel: {
+    weight: 1.0,
+    minConfidence: 0.4,
+    signals: [
+      { re: /\b(how\s+does\s+\w+\s+work|how\s+is\s+\w+\s+implemented)\b/i, w: 3.5 },
+      { re: /\b(what\s+calls?|who\s+calls?|callers?\s+of)\b/i, w: 3.5 },
+      { re: /\b(inheritance|extends|subclass|parent\s+class|class\s+hierarchy)\b/i, w: 3.0 },
+      { re: /\b(what\s+does\s+\w+\s+call|dependencies\s+of|call\s+graph|call\s+chain)\b/i, w: 3.0 },
+      { re: /\b(explain\s+(symbol|function|class|method)|where\s+is\s+\w+\s+defined)\b/i, w: 2.5 },
+      { re: /\b(trace|flow|data\s+flow|control\s+flow)\b/i, w: 2.0 },
+      { re: /\b(fix|change|update|create|write|delete)\b/i, w: -2.0 },
+      { re: /\b(run|execute|test|build)\b/i, w: -1.5 },
+    ],
+  },
   web: {
     weight: 1.0,
     minConfidence: 0.5,
@@ -102,7 +116,7 @@ const CATEGORIES = {
 };
 
 // Priority order for tie-breaking (prefer action over observation)
-const PRIORITY = ['write', 'run', 'search', 'plan', 'read', 'web', 'respond'];
+const PRIORITY = ['write', 'run', 'code_intel', 'search', 'plan', 'read', 'web', 'respond'];
 
 // Policy constants
 const SHORT_MSG_THRESHOLD = 10;
@@ -209,6 +223,8 @@ function classifyToolCategory(message) {
  */
 function getToolsForCategory(category) {
   switch (category) {
+    case 'code_intel':
+      return ['graph_search', 'explain_symbol', 'read_file', 'find_files', 'search'];
     case 'read':
       return ['read_file', 'list_projects', 'graph_search', 'find_files', 'find_and_read'];
     case 'write':
