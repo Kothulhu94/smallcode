@@ -194,9 +194,34 @@ system SmallCodeFeatures {
     cache: { key: hash(content), ttl: 10m }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // EXTENSION POINTS — template bodies live in src/extensions.ts
-  // ═══════════════════════════════════════════════════════════════════════════
+// SmallCode — Features 1-6 MarrowScript Declarations
+// ... (existing content above unchanged)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FEATURE 7: intent_clarifier (MarrowScript Roadmap #1)
+// Replaces hand-rolled regex in src/session/clarify.js with a compiled
+// classifier that uses caching, retry, and constrained output.
+// ═══════════════════════════════════════════════════════════════════════════
+
+  prompt intent_clarifier(user_message: string) {
+    model: TinyClassifier
+    template: "extension_point:tmpl_intent_clarifier"
+    returns: string
+    timeout: 2s
+    idempotent: true
+    validate: schema_only
+    on_invalid: retry
+    retry: { max_attempts: 2, backoff: fixed, interval: 100ms }
+    cache: { key: hash(user_message), ttl: 30m }
+    constraints: [
+      output in ["clear", "vague"]
+    ]
+  }
+
+  extension_point tmpl_intent_clarifier(user_message: string) {
+    returns: string
+    stable: true
+  }
 
   extension_point tmpl_repair_tool_call(original_call: string, error: string, tool_schema: string) {
     returns: string

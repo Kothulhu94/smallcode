@@ -156,7 +156,33 @@ async function retrieveContext(userMessage, mcpCall, maxFiles = 8) {
   return retriever.retrieveContext(userMessage, mcpCall, maxFiles);
 }
 
-// ─── Feature 6: Self-critique after edit ─────────────────────────────────────
+/**
+ * Check if a user message is too vague to act on.
+ * MarrowScript Feature #1: compiled intent_clarifier replaces hand-rolled regex
+ * in src/session/clarify.js. Falls back to the regex version if the model is
+ * unavailable (e.g. first turn before model is warmed up).
+ *
+ * @returns {Promise<boolean>} true = needs clarification
+ */
+async function checkNeedsClarification(userMessage) {
+  const prompts = _getPrompts();
+  if (!prompts) {
+    // Fallback to regex (src/session/clarify.js)
+    const { needsClarification } = require('../src/session/clarify');
+    return needsClarification(userMessage);
+  }
+  try {
+    const traceId = require('crypto').randomUUID();
+    const result = await prompts.callPrompt('intent_clarifier', {
+      user_message: userMessage,
+    }, { trace_id: traceId });
+    return String(result).trim().toLowerCase().startsWith('vague');
+  } catch {
+    // On any model failure, fall back to regex — never block on clarifier errors
+    const { needsClarification } = require('../src/session/clarify');
+    return needsClarification(userMessage);
+  }
+}
 
 /**
  * Ask model if the edit result looks correct.
@@ -201,5 +227,6 @@ module.exports = {
   submitCheckpointDecision,
   retrieveContext,
   validateEditCompiled,
+  checkNeedsClarification,
   isFeaturesAvailable,
 };

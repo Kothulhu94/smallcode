@@ -64,6 +64,7 @@ desktop.ini
 
 # Benchmark output (generated per run, stored in .smallcode/benchmarks/)
 .smallcode/benchmarks/
+.smallcode/snapshots/
 
 # MarrowScript source (internal, not shipped)
 # All .marrow files are excluded from git by default.
