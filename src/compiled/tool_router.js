@@ -19,6 +19,8 @@ const CATEGORIES = {
     signals: [
       { re: /\b(read|show|cat|display|print|view|open|look\s+at|check|see|inspect)\b/i, w: 3.0 },
       { re: /\b(what'?s\s+in|what\s+is\s+in|contents?\s+of|what\s+files|list\s+files|files\s+in|what'?s?\s+in)\b/i, w: 3.0 },
+      // review/analyze/examine are read+write actions that need file tools
+      { re: /\b(review|analyze|analyse|examine|audit|look\s+over|go\s+over)\b/i, w: 3.0 },
       { re: /\b(file|\.\w{1,4})\b/i, w: 1.5 },
       { re: /\b(fix|change|update|modify|add|remove|delete|create|write)\b/i, w: -2.0 },
       { re: /\b(run|execute|test|build|install)\b/i, w: -1.5 },
@@ -109,8 +111,10 @@ const CATEGORIES = {
       { re: /\b(help|guide|tutorial|example|show\s+me\s+how)\b/i, w: 2.0 },
       { re: /\b(opinion|think|recommend|suggest|best\s+practice)\b/i, w: 2.0 },
       { re: /\b(thanks|thank\s+you|ok|sure|yes|no|got\s+it)\b/i, w: 3.0 },
-      // Reduce score if this looks like a bug report
+      // Reduce score for anything that implies accessing files
       { re: /\b(failing|failed|broken|crash|error|bug|wrong)\b/i, w: -2.0 },
+      { re: /\b(review|check|look\s+at|analyze|analyse|read|show|examine|audit)\b/i, w: -3.0 },
+      { re: /\b(file|code|function|class|module|script|demo|mode)\b/i, w: -1.5 },
     ],
   },
 };
@@ -121,7 +125,9 @@ const PRIORITY = ['write', 'run', 'code_intel', 'search', 'plan', 'read', 'web',
 // Policy constants
 const SHORT_MSG_THRESHOLD = 10;
 const LONG_MSG_THRESHOLD = 200;
-const FALLBACK = 'respond'; // When nothing matches, respond is safest (no tools wasted)
+const FALLBACK = 'read'; // When nothing matches confidently, default to read (gives file tools).
+                         // 'respond' was the old default but it injects ZERO tools, causing the
+                         // model to give up and ask the user for files manually instead of reading them.
 const SHORT_MSG_DEFAULT = 'respond';
 
 /**
