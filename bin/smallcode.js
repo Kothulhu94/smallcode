@@ -579,6 +579,21 @@ async function runAgentLoop(userMessage, config) {
     getTrustDecay().reset();
   } catch {}
 
+  // Multi-model chaining (Feature #15): async call to planner model to pre-
+  // generate a numbered plan. Runs concurrently with task classification since
+  // both are pure network calls — we await it just before the first chatCompletion.
+  // Only fires when SMALLCODE_CHAIN=true, a planner model is configured, and the
+  // task looks complex enough to benefit from pre-planning (fast tasks skip it).
+  let _plannerPromise = null;
+  try {
+    const { callPlanner, getChainConfig } = require('../src/model/chain');
+    const { estimateComplexity } = require('../src/model/router');
+    const cc = getChainConfig();
+    if (cc.enabled && cc.planner && estimateComplexity(userMessage) !== 'fast') {
+      _plannerPromise = callPlanner(userMessage, config);
+    }
+  } catch {}
+
   // Governor: classify task type (determines verification strategy)
   // Uses MarrowScript-compiled classifier with regex fallback
   try {
@@ -714,6 +729,26 @@ async function runAgentLoop(userMessage, config) {
   }
 
   let toolCallsThisTurn = 0;
+
+  // Await planner result (Feature #15) and inject into conversation as a system
+  // message if it produced a valid plan. This happens ONCE before the first
+  // chatCompletion call — the await here is cheap since we started the request
+  // concurrently with task classification above.
+  let _plannerInjected = false;
+  try {
+    if (_plannerPromise) {
+      const plan = await _plannerPromise;
+      if (plan) {
+        const { formatPlannerInjection } = require('../src/model/chain');
+        const injection = formatPlannerInjection(plan);
+        if (injection) {
+          conversationHistory.push({ role: 'system', content: injection });
+          _plannerInjected = true;
+          if (_fullscreenRef) _fullscreenRef.addTool('chain', 'ok', `planner: ${plan.split('\n').length} steps`);
+        }
+      }
+    }
+  } catch {}
 
   while (toolCallsThisTurn < MAX_TOOL_CALLS) {
     // Mid-turn context check: if history is getting too large, evict old tool results
@@ -1368,6 +1403,15 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
   // and what failed. Stored as type:'context' tag:'evidence' in the existing
   // memory MCP module so it doesn't hog the live system prompt.
   const finishedTrace = traceRecorder.stop();
+
+  // Clean up planner injection (Feature #15) — remove the chain planner's
+  // system message from history so it doesn't pollute future turns.
+  if (_plannerInjected) {
+    const idx = conversationHistory.findIndex(m =>
+      m.role === 'system' && typeof m.content === 'string' &&
+      m.content.includes('PRE-ANALYZED PLAN'));
+    if (idx >= 0) conversationHistory.splice(idx, 1);
+  }
   try {
     if (finishedTrace) {
       const { recordEvidence } = require('../src/memory/evidence');
@@ -1413,8 +1457,16 @@ function runValidation(filePath) {
   return _runValidationModule(filePath);
 }
 
-// Build a compact system prompt — only includes sections relevant to the task type
+// Build a compact system prompt — only includes sections relevant to the task type.
+// When SMALLCODE_CACHE_SPLIT=true (Feature #14), this returns ONLY the static portion
+// (identity, OS, bootstrap, rules) so it's cache-friendly across turns. Dynamic content
+// (memory, knowledge, plan, test runner) is moved into a [CONTEXT] block prepended to
+// the latest user message via buildDynamicContext().
+//
+// When SMALLCODE_CACHE_SPLIT=false (default for backwards compat), everything is in
+// the system prompt as before.
 function buildCompactSystemPrompt(taskType, messages) {
+  const cacheSplit = process.env.SMALLCODE_CACHE_SPLIT === 'true';
   const os = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
   const osHint = process.platform === 'win32' ? '\nUse "dir" not "ls", "type" not "cat". No bash-only commands.' : '';
 
@@ -1441,10 +1493,41 @@ Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concis
     prompt += `\n\nFor Node.js backends: write a .bone file → bone_check → bone_compile. Don't hand-write routes.`;
   }
 
-  // Add memory/skills/plugins (already compact)
+  if (cacheSplit) {
+    // Dynamic context goes into a separate [CONTEXT] user message — see
+    // buildDynamicContext(). Plan + plugins stay here (system role = authoritative).
+    prompt += getPluginPrompts() + getActivePlanContext() + getTestRunnerContext();
+    return prompt;
+  }
+
+  // Legacy behavior: everything in the system prompt
   prompt += getMemoryContext(messages) + getSkillContext(messages) + getPluginPrompts() + getKnowledgeContext(messages) + getActivePlanContext() + getTestRunnerContext();
 
   return prompt;
+}
+
+// Build the dynamic context block that goes into a [CONTEXT] user message
+// when SMALLCODE_CACHE_SPLIT=true. Returns '' when there's no dynamic content
+// or when cache-split is disabled.
+function buildDynamicContext(messages) {
+  if (process.env.SMALLCODE_CACHE_SPLIT !== 'true') return '';
+  const parts = [
+    // Memory + knowledge are query-dependent → move to user message (dynamic)
+    getMemoryContext(messages),
+    getSkillContext(messages),
+    getKnowledgeContext(messages),
+    // Note: getPluginPrompts() stays in the system prompt — plugin instructions
+    //   are authoritative and should come from the system role.
+    // Note: getActivePlanContext() stays in the system prompt — the model needs
+    //   to trust plan step instructions; user-role is ignored for directives.
+    // Note: getTestRunnerContext() stays in the system prompt — it's stable and
+    //   benefits from caching alongside the static base.
+  ].filter(p => p && p.length > 0);
+  if (parts.length === 0) return '';
+  // Strip ANSI from the dynamic block — same reason we strip from messages:
+  // memory/knowledge entries can contain ANSI color codes from prior tool output.
+  const raw = `<sc:context>\n${parts.join('')}\n</sc:context>\n\n`;
+  return raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
 }
 
 // Test runner context (Feature 10): inject the detected test command once
@@ -1570,6 +1653,38 @@ async function chatCompletion(config, messages) {
     }
     const processedMessages = messages.map(stripAnsiFromMsg);
 
+    // Cache-split (Feature #14): when SMALLCODE_CACHE_SPLIT=true, dynamic
+    // context (memory, knowledge) is moved out of the system prompt and into
+    // a [CONTEXT] block prepended to the latest user message. This keeps the
+    // system prompt stable across turns so remote APIs with prefix caching
+    // (Anthropic, OpenAI) get cache hits on the static portion.
+    const dynamicCtx = buildDynamicContext(messages);
+    if (dynamicCtx) {
+      const lastIdx = processedMessages.reduce((last, m, i) => m.role === 'user' ? i : last, -1);
+      if (lastIdx >= 0) {
+        const lastMsg = processedMessages[lastIdx];
+        if (typeof lastMsg.content === 'string') {
+          processedMessages[lastIdx] = {
+            ...lastMsg,
+            content: dynamicCtx + lastMsg.content,
+          };
+        }
+        // If last user message is multimodal (image array), prepend as first text element
+        else if (Array.isArray(lastMsg.content)) {
+          const firstText = lastMsg.content.find(c => c.type === 'text');
+          if (firstText) {
+            processedMessages[lastIdx] = {
+              ...lastMsg,
+              content: [
+                { type: 'text', text: dynamicCtx + firstText.text },
+                ...lastMsg.content.filter(c => c !== firstText),
+              ],
+            };
+          }
+        }
+      }
+    }
+
     // Transform messages with images into multimodal format
     // OPTIMIZATION: Only re-extract images from the LAST user message (the new one).
     // Older messages that had images already had their content consumed; re-reading
@@ -1601,6 +1716,13 @@ async function chatCompletion(config, messages) {
       temperature: 0.1,
       max_tokens: 4096,
     };
+
+    // Multi-model chaining (Feature #15): override model name with executor
+    // if chain config is active. No-op when SMALLCODE_CHAIN is not set.
+    try {
+      const { getExecutorModel } = require('../src/model/chain');
+      body.model = getExecutorModel('', config); // task already classified at loop start
+    } catch {}
 
     // Apply thinking budget for reasoning models (Qwen3, DeepSeek R1, Claude with
     // thinking, GPT-5 reasoning). Without this, a small reasoning model can spend
@@ -1981,6 +2103,10 @@ async function runNonInteractive(config, prompt) {
   try {
     const { resetReadTracker } = require('../src/tools/read_tracker');
     resetReadTracker();
+  } catch {}
+  try {
+    const { resetFileStateTracker } = require('../src/session/file_state');
+    resetFileStateTracker();
   } catch {}
   try {
     const { resetDedup } = require('../src/tools/dedup');

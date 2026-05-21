@@ -19,6 +19,7 @@ const {
 const { getShell } = require('../src/tools/shell_session');
 const { getReadTracker } = require('../src/tools/read_tracker');
 const { getSnapshotManager } = require('../src/session/snapshot');
+const { getFileStateTracker } = require('../src/session/file_state');
 
 // ─── RTK (Rust Token Killer) integration ─────────────────────────────────────
 // Auto-rewrites supported bash commands through rtk for 60-90% token savings.
@@ -108,6 +109,24 @@ async function executeTool(name, args, ctx) {
       const safeSlice = slice.map(l => sanitizeToolOutput(l));
       const numbered = safeSlice.map((l, i) => `${String(start + i + 1).padStart(4)}│ ${l}`).join('\n');
 
+      // Diff-based context (Feature #16): when SMALLCODE_DIFF_CONTEXT=true
+      // and the model has already read this file, return a diff instead of the
+      // full content. Falls back to full content if diff is too large or if the
+      // file hasn't changed. Only applies when no line range is requested.
+      if (!args.start_line && !args.end_line) {
+        try {
+          const tracker = getFileStateTracker();
+          const result = tracker.record(filePath, content);
+          if (result.mode === 'unchanged') {
+            return { result: `${args.path} (${lines.length} lines — unchanged since last read, no diff)` };
+          }
+          if (result.mode === 'diff') {
+            return { result: `${args.path} changes since last read (${result.fullLength} lines total):\n${sanitizeToolOutput(result.diff)}` };
+          }
+          // mode === 'full' — fall through to normal path below
+        } catch {} // diff tracker failure is always non-fatal
+      }
+
       // Feature 2: summarize large files (>200 lines, no line range requested)
       // This saves context by replacing the full file with signatures + key logic
       if (lines.length > 200 && !args.start_line && !args.end_line) {
@@ -146,6 +165,8 @@ async function executeTool(name, args, ctx) {
       try { getSnapshotManager({ workdir: cwd }).note(filePath, oldContent); } catch {}
       fs.writeFileSync(filePath, args.content);
       tracker.recordWrite(filePath, cwd);
+      // Update diff tracker so subsequent reads see the new state
+      try { getFileStateTracker().recordWrite(filePath, args.content); } catch {}
       const lineCount = args.content.split('\n').length;
       const action = existed ? 'Updated' : 'Created';
       if (_fullscreenRef && existed && oldContent) {
@@ -171,6 +192,7 @@ async function executeTool(name, args, ctx) {
       if (count > 1) return { error: `old_str matches ${count} locations. Include more context.` };
       content = content.replace(args.old_str, args.new_str);
       fs.writeFileSync(filePath, content);
+      try { getFileStateTracker().recordWrite(filePath, content); } catch {}
       const lineNum = content.slice(0, content.indexOf(args.new_str)).split('\n').length;
       const oldLines = args.old_str.split('\n').length;
       const newLines = args.new_str.split('\n').length;

@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.9.0] - 2026-05-21
+
+### Feature #16 — Diff-Based Context
+
+New module `src/session/file_state.js`. When `SMALLCODE_DIFF_CONTEXT=true`,
+`read_file` returns a unified diff instead of full content when the model has
+already read the file this session:
+
+- First read: full content (as before)
+- Re-read, unchanged: one-line note — no tokens wasted
+- Re-read, changed: compact unified diff with 3 lines of context per hunk
+- Fallback to full if diff exceeds 70% of content size (configurable)
+- Files > 2000 lines skip the O(n²) LCS computation entirely
+- `write_file` and `patch` update the tracker so subsequent reads see fresh state
+- Default OFF (`SMALLCODE_DIFF_CONTEXT=false`) — opt-in; no impact on existing behavior
+
+**Bugs fixed during audit:**
+- `buildHunk` computed wrong `newStart` for deletion-first hunks (off by actual position)
+- No zero-division guard when content is empty
+- No size guard on O(n×m) DP table — could OOM on large files (now capped at 2000 lines)
+- Test expectation wrong: diff of tiny 5-line file always exceeds ratio threshold due to
+  header overhead — corrected test to use 30-line file
+
+### Feature #15 — Multi-Model Chaining
+
+New module `src/model/chain.js` enables a forward-chaining pipeline where
+different models handle different stages of the same task:
+
+```
+1B classifier → 4B planner → 8B executor
+```
+
+- **Planner call** fires concurrently with task classification (zero added
+  latency on the critical path). Produces a numbered plan injected as a
+  system message before the first `chatCompletion` call.
+- **Executor override** — when `SMALLCODE_CHAIN_EXECUTOR` is set, the main
+  chat completion uses that model name instead of `config.model.name`.
+- Falls through silently if the planner is unavailable or times out (15s limit).
+- Complexity guard: fast tasks (rename, explain, typo fix) skip the planner.
+- Planner injection is removed from `conversationHistory` at turn end.
+- Chain config is cached after first read — no repeated env-var lookups.
+
+Configuration:
+```
+SMALLCODE_CHAIN=true
+SMALLCODE_CHAIN_PLANNER=gemma-2b          # cheap planner model
+SMALLCODE_CHAIN_EXECUTOR=qwen3-8b         # main executor
+SMALLCODE_CHAIN_PLANNER_URL=http://...    # optional separate endpoint
+SMALLCODE_CHAIN_EXECUTOR_URL=http://...
+```
+
+**Audit fixes:**
+- Used dynamic `import('node-fetch')` which fails on ESM-only v3; switched to
+  `globalThis.fetch` (native Node 18+) with `require('node-fetch')` v2 fallback
+- Redundant `estimateComplexity` check inside `callPlanner` removed; caller
+  guards before starting the promise
+- Stale `require('./router')` import removed from chain.js (unused after refactor)
+
+### Feature #14 — Prompt Cache Splitting
+
+Moves query-dependent context (memory, knowledge, skills) out of the system
+prompt and into a `<sc:context>` block prepended to the latest user message
+when `SMALLCODE_CACHE_SPLIT=true`. The system prompt becomes stable across
+turns — remote APIs with prefix caching (Anthropic, OpenAI) can now cache the
+static portion instead of re-processing it every turn.
+
+- Default: OFF (legacy behaviour, everything in system prompt)
+- Enable: `SMALLCODE_CACHE_SPLIT=true`
+- Plan anchor, plugin prompts, and test runner stay in system prompt (authoritative/stable)
+- Memory, knowledge, skills move to `<sc:context>` prepended to user message
+- `<sc:context>` block is ANSI-stripped before injection
+- Multimodal messages (images) handled — context prepended to first text element
+- No impact on non-interactive or local deployments; benefit is at remote APIs
+
+**Audit fixes found during implementation:**
+- Plugin prompts incorrectly included in dynamic block (moved back to system)
+- Plan step instructions incorrectly included in dynamic block (moved back to system)
+- Multimodal last-user-message silently dropped context — now prepended to first text element
+- Dynamic block not ANSI-stripped before injection — fixed
+- `<context>` tag could clash with user-pasted XML — changed to `<sc:context>`
+
 ## [0.8.0] - 2026-05-21
 
 ### Bug Audit — Features 7-13
