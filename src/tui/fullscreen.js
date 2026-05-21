@@ -11,6 +11,74 @@
 
 const readline = require('readline');
 
+// ─── Visual Width Helpers ─────────────────────────────────────────────────────
+// CJK and fullwidth characters occupy 2 columns in the terminal, not 1.
+// Using string.length for layout/cursor breaks when input contains CJK text.
+
+function visualWidth(ch) {
+  const cp = ch.codePointAt(0);
+  if (!cp) return 0;
+  if (cp >= 0x1100 && (
+    cp <= 0x115F ||                    // Hangul Jamo
+    (cp >= 0x2E80 && cp <= 0xA4CF) ||  // CJK Radicals, Kangxi, Ideographic Description, CJK Symbols, Hiragana, Katakana, Bopomofo, etc.
+    (cp >= 0xA960 && cp <= 0xA97C) ||  // Hangul Jamo Extended-A
+    (cp >= 0xAC00 && cp <= 0xD7AF) ||  // Hangul Syllables
+    (cp >= 0xF900 && cp <= 0xFAFF) ||  // CJK Compatibility Ideographs
+    (cp >= 0xFE10 && cp <= 0xFE19) ||  // Vertical Forms
+    (cp >= 0xFE30 && cp <= 0xFE6F) ||  // CJK Compatibility Forms
+    (cp >= 0xFF01 && cp <= 0xFF60) ||  // Fullwidth Forms
+    (cp >= 0xFFE0 && cp <= 0xFFE6) ||  // Fullwidth Signs
+    (cp >= 0x20000 && cp <= 0x2FFFF) || // CJK Unified Ideographs Extension B-F
+    (cp >= 0x30000 && cp <= 0x3FFFF)   // CJK Unified Ideographs Extension G-H
+  )) return 2;
+  return 1;
+}
+
+function visualLength(str) {
+  let len = 0;
+  for (const ch of str) len += visualWidth(ch);
+  return len;
+}
+
+// Split string into visual lines, each no wider than maxVisualWidth.
+function visualWrap(str, maxVisualWidth) {
+  if (str.length === 0) return [''];
+  const lines = [];
+  let current = '';
+  let curWidth = 0;
+  for (const ch of str) {
+    const w = visualWidth(ch);
+    if (curWidth + w > maxVisualWidth) {
+      lines.push(current);
+      current = ch;
+      curWidth = w;
+    } else {
+      current += ch;
+      curWidth += w;
+    }
+  }
+  if (current.length > 0) lines.push(current);
+  return lines;
+}
+
+// Compute cursor visual (line, col) from character index into str.
+function visualCursorPosition(str, cursorIdx, maxVisualWidth) {
+  let line = 0;
+  let col = 0;
+  let charIdx = 0;
+  for (const ch of str) {
+    if (charIdx >= cursorIdx) break;
+    const w = visualWidth(ch);
+    if (col + w > maxVisualWidth) {
+      line++;
+      col = 0;
+    }
+    col += w;
+    charIdx++;
+  }
+  return { line, col };
+}
+
 // ─── ANSI Escape Sequences ───────────────────────────────────────────────────
 
 const ESC = '\x1b[';
@@ -221,7 +289,8 @@ class FullScreenTUI {
 
     // Dynamic input height: grows with content (min 3, max 8 lines)
     const inputAvail = this.width - 5;
-    const wrappedLines = inputAvail > 0 ? Math.ceil(Math.max(1, this.inputBuffer.length) / inputAvail) : 1;
+    const inputVisualLen = visualLength(this.inputBuffer);
+    const wrappedLines = inputAvail > 0 ? Math.ceil(Math.max(1, inputVisualLen) / inputAvail) : 1;
     this.inputHeight = Math.min(8, Math.max(3, wrappedLines + 2)); // +2 for border + hint
 
     this.chatHeight = this.height - this.inputHeight - this.statusHeight;
@@ -260,12 +329,11 @@ class FullScreenTUI {
     // Status bar
     buf += this._renderStatus();
 
-    // Position cursor in wrapped input
+    // Position cursor in wrapped input (visual-width-aware)
     const inputAvail = this.width - 5;
-    const cursorLine = Math.floor(this.inputCursor / inputAvail); // which wrapped line
-    const cursorCol = this.inputCursor % inputAvail; // position within that line
-    const inputRow = this.chatHeight + 2 + cursorLine; // +1 border, +1 for 1-index
-    const inputCol = 5 + cursorCol; // "│ > " prefix
+    const pos = visualCursorPosition(this.inputBuffer, this.inputCursor, inputAvail);
+    const inputRow = this.chatHeight + 2 + pos.line; // +1 border, +1 for 1-index
+    const inputCol = 5 + pos.col; // "│ > " prefix
     buf += ANSI.moveTo(inputRow, inputCol) + ANSI.showCursor;
 
     this._rawWrite(buf);
@@ -415,16 +483,7 @@ class FullScreenTUI {
 
     // Input area — wraps vertically for long text
     const inputAvail = this.width - 5; // "│ > " prefix / "│   " continuation
-    const inputLines = [];
-    
-    // Word-wrap the input buffer into lines
-    if (this.inputBuffer.length === 0) {
-      inputLines.push('');
-    } else {
-      for (let i = 0; i < this.inputBuffer.length; i += inputAvail) {
-        inputLines.push(this.inputBuffer.slice(i, i + inputAvail));
-      }
-    }
+    const inputLines = visualWrap(this.inputBuffer, inputAvail);
 
     // Render each wrapped line
     for (let i = 0; i < inputLines.length && i < 6; i++) {
@@ -436,7 +495,8 @@ class FullScreenTUI {
         buf += '   ' + t.inputBg + t.fg;
       }
       buf += inputLines[i];
-      buf += ' '.repeat(Math.max(0, inputAvail - inputLines[i].length));
+      const lineVisualLen = visualLength(inputLines[i]);
+      buf += ' '.repeat(Math.max(0, inputAvail - lineVisualLen));
       buf += ANSI.reset;
     }
 
