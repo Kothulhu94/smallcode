@@ -42,17 +42,16 @@ const THINK_PATTERNS = [
 
 /**
  * Apply thinking budget to a chat completion request body.
- * Mutates the body and returns it. Different providers honour different fields;
- * we set them all defensively. Providers that don't recognize a field ignore it.
+ * Only injects fields that are appropriate for the target provider.
+ * OpenAI's API rejects unknown top-level fields with 400 errors.
  *
- * @param {object} body - The request body about to be sent
+ * @param {object} body    - The request body about to be sent
  * @param {object} options
- * @param {number} options.tokens - Token budget for thinking (0 = disabled)
+ * @param {number}  options.tokens  - Token budget for thinking (0 = disabled)
  * @param {boolean} options.disable - Disable thinking entirely
+ * @param {string}  options.baseUrl - Endpoint URL (used to detect provider)
  */
 function applyThinkingBudget(body, options = {}) {
-  // Don't mutate the caller's options — copy so SMALLCODE_THINKING_DISABLE env
-  // override doesn't leak back into their object.
   const opts = { ...options };
   const tokens = opts.disable
     ? 0
@@ -62,35 +61,46 @@ function applyThinkingBudget(body, options = {}) {
     opts.disable = true;
   }
 
+  const baseUrl = String(opts.baseUrl || '').toLowerCase();
+
+  // Detect provider from URL so we only send fields that provider accepts.
+  // OpenAI's production API rejects unknown top-level parameters with HTTP 400.
+  const isOpenAICloud = baseUrl.includes('api.openai.com') || baseUrl.includes('openrouter.ai');
+  const isAnthropic = baseUrl.includes('anthropic.com') || baseUrl.includes('claude');
+  const isLocalLlamaCpp = !isOpenAICloud && !isAnthropic; // LM Studio, Ollama, llama.cpp
+
   // Anthropic-style: { thinking: { type: "enabled", budget_tokens: N } }
-  // Set type:"disabled" to turn off, otherwise set the budget.
-  body.thinking = opts.disable
-    ? { type: 'disabled' }
-    : { type: 'enabled', budget_tokens: Math.max(0, tokens) };
-
-  // OpenAI o1/o3-style: reasoning_effort field with low/medium/high
-  // Map our token budget to this enum.
-  if (!opts.disable) {
-    if (tokens <= 500) body.reasoning_effort = 'low';
-    else if (tokens <= 3000) body.reasoning_effort = 'medium';
-    else body.reasoning_effort = 'high';
-  } else {
-    body.reasoning_effort = 'low';
+  // Only send to Anthropic or local servers (local servers ignore unknown fields).
+  if (isAnthropic || isLocalLlamaCpp) {
+    body.thinking = opts.disable
+      ? { type: 'disabled' }
+      : { type: 'enabled', budget_tokens: Math.max(0, tokens) };
   }
 
-  // Qwen-style chat_template_kwargs: { enable_thinking: bool }
-  // Some Qwen3 builds expect this in a special field.
-  body.chat_template_kwargs = body.chat_template_kwargs || {};
-  body.chat_template_kwargs.enable_thinking = !opts.disable;
-  if (!opts.disable) {
-    body.chat_template_kwargs.thinking_budget = tokens;
+  // OpenAI o1/o3-style reasoning_effort — only for OpenAI cloud endpoints and local.
+  // GPT-5.5 and earlier standard models (gpt-4o etc.) do NOT accept this field.
+  // Only safe to send when model name starts with 'o1' / 'o3' / 'o4'.
+  const modelName = String(body.model || '').toLowerCase();
+  const isReasoningModel = /^(o1|o3|o4|claude-3-7|qwen3|qwen-3|deepseek-r|deepseek-v)/.test(modelName);
+  if (isReasoningModel || isLocalLlamaCpp) {
+    if (!opts.disable) {
+      if (tokens <= 500) body.reasoning_effort = 'low';
+      else if (tokens <= 3000) body.reasoning_effort = 'medium';
+      else body.reasoning_effort = 'high';
+    } else {
+      body.reasoning_effort = 'low';
+    }
   }
 
-  // DeepSeek/llama.cpp-style: a top-level enable_thinking flag.
-  // NOTE: setting both top-level + chat_template_kwargs is fine — providers
-  // either honour their own field and ignore the other, or accept whichever
-  // is present. We've seen no providers that conflict on these two.
-  body.enable_thinking = !opts.disable;
+  // Qwen/llama.cpp-style fields — local only, never send to OpenAI/Anthropic cloud.
+  if (isLocalLlamaCpp) {
+    body.chat_template_kwargs = body.chat_template_kwargs || {};
+    body.chat_template_kwargs.enable_thinking = !opts.disable;
+    if (!opts.disable) {
+      body.chat_template_kwargs.thinking_budget = tokens;
+    }
+    body.enable_thinking = !opts.disable;
+  }
 
   return body;
 }

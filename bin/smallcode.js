@@ -1872,7 +1872,7 @@ async function chatCompletion(config, messages) {
     // to turn it off entirely.
     try {
       const { applyThinkingBudget } = require('../src/model/thinking_budget');
-      applyThinkingBudget(body);
+      applyThinkingBudget(body, { baseUrl });
     } catch {} // optional — fall through if module unavailable
 
     // Adaptive retry temperature (Feature 12): nudge temperature per attempt.
