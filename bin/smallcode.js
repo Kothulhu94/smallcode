@@ -1447,11 +1447,17 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
         const { execSync, execFileSync } = require('child_process');
         const status = execSync('git status --porcelain', { encoding: 'utf-8', cwd: process.cwd(), timeout: 5000 });
         if (status.trim()) {
-          // Get a short summary from the first user message this turn
+          // MarrowScript Feature #2: use compiled commit_message prompt instead of
+          // simple string truncation. Falls back to truncation if prompt unavailable.
           const lastUser = [...conversationHistory].reverse().find(m => m.role === 'user' && !m.content.startsWith('['));
-          const commitMsg = lastUser
-            ? `smallcode: ${lastUser.content.slice(0, 50).replace(/[\n\r"'`$\\]/g, ' ').trim()}`
-            : 'smallcode: auto-commit';
+          const task = lastUser ? lastUser.content : 'auto-commit';
+          let commitMsg;
+          try {
+            const { generateCommitMessage } = require('./features_adapter');
+            commitMsg = await generateCommitMessage(task, _editedFilesThisTurn);
+          } catch {
+            commitMsg = `smallcode: ${task.slice(0, 50).replace(/[\n\r"'`$\\]/g, ' ').trim()}`;
+          }
           execFileSync('git', ['add', '-A'], { cwd: process.cwd(), timeout: 5000 });
           execFileSync('git', ['commit', '-m', commitMsg], { encoding: 'utf-8', cwd: process.cwd(), timeout: 10000 });
           if (_fullscreenRef) {
