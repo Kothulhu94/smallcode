@@ -729,6 +729,8 @@ async function runAgentLoop(userMessage, config) {
   }
 
   let toolCallsThisTurn = 0;
+  let _editedFilesThisTurn = []; // track files written/patched for reviewer
+  let _reviewerPromise = null;   // reviewer async promise, awaited at turn end
 
   // Await planner result (Feature #15) and inject into conversation as a system
   // message if it produced a valid plan. This happens ONCE before the first
@@ -941,6 +943,11 @@ async function runAgentLoop(userMessage, config) {
 
         // Record trace step
         traceRecorder.recordToolCall(toolName, toolArgs, result.result || result.error || '', toolMs);
+
+        // Track edited files for reviewer agent (Feature #18)
+        if ((toolName === 'write_file' || toolName === 'patch') && !result.error && toolArgs.path) {
+          _editedFilesThisTurn.push(toolArgs.path);
+        }
 
         // Trust decay (Feature 13): track consecutive failures per tool.
         // Dropped tools are filtered out of the schema list on the next
@@ -1316,6 +1323,27 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
     if (message.content) {
       conversationHistory.push({ role: 'assistant', content: message.content });
 
+      // Reviewer agent (Feature #18): async critique of the response when files
+      // were edited this turn. Non-blocking — fires after history push, injects
+      // a note only if a real issue is found. Disable with SMALLCODE_REVIEWER=false.
+      if (_editedFilesThisTurn.length > 0 && message.content.length > 50) {
+        try {
+          const { reviewResponse, formatReviewerInjection, getReviewerConfig } = require('../src/model/reviewer');
+          if (getReviewerConfig(config).enabled) {
+            _reviewerPromise = reviewResponse(userMessage, message.content, _editedFilesThisTurn, config)
+              .then(reviewResult => {
+                const injection = formatReviewerInjection(reviewResult);
+                if (injection) {
+                  conversationHistory.push({ role: 'user', content: injection });
+                  if (_fullscreenRef) _fullscreenRef.addTool('reviewer', 'err', reviewResult.issues[0]?.slice(0, 80) || 'issues found');
+                  else console.log(`  \x1b[33m⚠ reviewer: ${reviewResult.issues[0]?.slice(0, 100) || 'issues found'}\x1b[0m`);
+                }
+              })
+              .catch(() => {});
+          }
+        } catch {}
+      }
+
       // Plan extraction from a tool-less response (model planned without tools)
       try {
         if (_planTracker && _planTracker.needsPlan()) {
@@ -1411,6 +1439,17 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       m.role === 'system' && typeof m.content === 'string' &&
       m.content.includes('PRE-ANALYZED PLAN'));
     if (idx >= 0) conversationHistory.splice(idx, 1);
+  }
+
+  // Await reviewer result (Feature #18) — give it up to 5 extra seconds
+  // before exiting so non-interactive runs can still receive critique injection.
+  if (typeof _reviewerPromise !== 'undefined' && _reviewerPromise) {
+    try {
+      await Promise.race([
+        _reviewerPromise,
+        new Promise(r => setTimeout(r, 5000)),
+      ]);
+    } catch {}
   }
   try {
     if (finishedTrace) {
