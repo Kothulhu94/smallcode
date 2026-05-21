@@ -1811,6 +1811,41 @@ async function chatCompletion(config, messages) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
+    // Spinner: show rotating ASCII while waiting for the model to respond.
+    // Gives the user clear visual feedback that the process is alive, not hung.
+    // Clears when the response arrives or on error.
+    let _spinnerInterval = null;
+    let _spinnerElapsed = 0;
+    const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    if (!_fullscreenRef && process.stdout.isTTY) {
+      let _spinFrame = 0;
+      _spinnerInterval = setInterval(() => {
+        _spinnerElapsed += 100;
+        const secs = (_spinnerElapsed / 1000).toFixed(1);
+        process.stdout.write(`\r  ${SPINNER_FRAMES[_spinFrame % SPINNER_FRAMES.length]} Waiting for model... ${secs}s \r`);
+        _spinFrame++;
+      }, 100);
+    } else if (_fullscreenRef) {
+      // In fullscreen TUI, pulse the status bar instead
+      let _spinFrame = 0;
+      _spinnerInterval = setInterval(() => {
+        _spinnerElapsed += 200;
+        _fullscreenRef.setStatus?.(`${SPINNER_FRAMES[_spinFrame % SPINNER_FRAMES.length]} thinking ${(_spinnerElapsed / 1000).toFixed(0)}s`);
+        _spinFrame++;
+      }, 200);
+    }
+    const _stopSpinner = () => {
+      if (_spinnerInterval) {
+        clearInterval(_spinnerInterval);
+        _spinnerInterval = null;
+        if (!_fullscreenRef && process.stdout.isTTY) {
+          process.stdout.write('\r' + ' '.repeat(50) + '\r'); // clear spinner line
+        } else if (_fullscreenRef) {
+          _fullscreenRef.setStatus?.('');
+        }
+      }
+    };
+
     let response;
     try {
       response = await fetch(`${baseUrl}/chat/completions`, {
@@ -1821,17 +1856,27 @@ async function chatCompletion(config, messages) {
       });
     } catch (fetchErr) {
       clearTimeout(timeout);
-      // Distinguish timeout from unreachable endpoint
+      _stopSpinner();
+      // Distinguish timeout from unreachable endpoint — show both in TUI and console
       if (fetchErr.name === 'AbortError' || fetchErr.message?.includes('abort')) {
         const msg = `Model timed out after ${timeoutSecs}s. The model is still processing or the endpoint is unresponsive.\n  Tip: increase timeout with SMALLCODE_MODEL_TIMEOUT=600 in your .env`;
         console.log(`  \x1b[33m⏱ ${msg}\x1b[0m`);
         if (_fullscreenRef) _fullscreenRef.addTool('timeout', 'err', `no response after ${timeoutSecs}s`);
       } else {
-        console.log(`  \x1b[31m✗ ${fetchErr.message}\x1b[0m`);
+        // Surface the actual LM Studio / endpoint error in the TUI so the user
+        // can see what went wrong without digging through logs.
+        const errMsg = fetchErr.message || 'Connection failed';
+        const hint = errMsg.includes('ECONNREFUSED') ? ' — is LM Studio running?' :
+                     errMsg.includes('ENOTFOUND')    ? ' — check SMALLCODE_BASE_URL' :
+                     errMsg.includes('ECONNRESET')   ? ' — LM Studio may have crashed or restarted' :
+                     '';
+        console.log(`  \x1b[31m✗ Endpoint error: ${errMsg}${hint}\x1b[0m`);
+        if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `${errMsg.slice(0, 80)}${hint}`);
       }
       return null;
     }
     clearTimeout(timeout);
+    _stopSpinner();
 
     if (!response.ok) {
       const err = await response.text();
@@ -1847,7 +1892,9 @@ async function chatCompletion(config, messages) {
           if (retry.ok) return await retry.json();
         } catch {}
       }
-      console.log(`  \x1b[31m✗ API error ${response.status}: ${err.slice(0, 200)}\x1b[0m`);
+      const errDetail = err.slice(0, 200);
+      console.log(`  \x1b[31m✗ API error ${response.status}: ${errDetail}\x1b[0m`);
+      if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `HTTP ${response.status}: ${errDetail.slice(0, 80)}`);
       return null;
     }
 

@@ -537,13 +537,18 @@ class FullScreenTUI {
     buf += ANSI.moveTo(row, 1);
     buf += t.statusBg;
 
-    const left = ` enter send  shift+drag copy`;
+    // Dynamic status message (e.g. spinner during model call) overrides left hint
+    const left = this.statusMsg
+      ? ` ${this.statusMsg}`
+      : ` enter send  shift+drag copy`;
     const scrollInfo = this.chatScroll < 0 ? `  ↑ scrolled` : '';
     const tokenStr = this.tokenInfo ? `  ${this.tokenInfo}` : '';
     const right = ` smallcode  ${this.model}  ${this.isStreaming ? '⟳' : '●'} `;
     const padding = this.width - left.length - scrollInfo.length - tokenStr.length - right.length;
 
-    buf += t.muted + left + ANSI.reset + t.statusBg;
+    // Color the status message differently when it contains a spinner frame
+    const leftColor = this.statusMsg ? (t.accent || t.muted) : t.muted;
+    buf += leftColor + left + ANSI.reset + t.statusBg;
     if (scrollInfo) {
       buf += (t.warning || t.muted) + scrollInfo + ANSI.reset + t.statusBg;
     }
@@ -552,6 +557,12 @@ class FullScreenTUI {
     buf += t.brandDim + right + ANSI.reset;
 
     return buf;
+  }
+
+  /** Set a transient status message shown in the status bar. Pass '' to clear. */
+  setStatus(msg) {
+    this.statusMsg = msg || '';
+    this.render();
   }
 
   // ─── Input Handling ──────────────────────────────────────────────────
