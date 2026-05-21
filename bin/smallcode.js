@@ -489,7 +489,14 @@ async function runAgentLoop(userMessage, config) {
   // and we don't want to add 2s latency to every detailed task description.
   const { getClarificationInstruction } = require('../src/session/clarify');
   let _needsClarification = false;
-  if (userMessage.length < 80) {
+  // Skip clarifier when the message is clearly actionable even if short:
+  // - Looks like a file path (quoted, contains slash/backslash, has extension)
+  // - Pure number or "option N" / "work on N" — context-reference to prior options
+  // - Affirmation in continuation context (yes/ok/sure/proceed)
+  const looksLikePath = /[\\\/]|\.\w{1,5}\s*$|^["'].*["']$/.test(userMessage.trim());
+  const looksLikeOptionRef = /^(option\s+\d|work\s+on\s+\d|do\s+\d|start\s+with\s+\d|^\d+\.?\s*$|first|second|third|fourth)\b/i.test(userMessage.trim());
+  const looksLikeAffirmation = /^(yes|y|yep|yeah|sure|ok|okay|go|proceed|do it|continue|please|alright|👍|✅)\b\s*\.?\s*$/i.test(userMessage.trim());
+  if (userMessage.length < 80 && !looksLikePath && !looksLikeOptionRef && !looksLikeAffirmation) {
     try {
       const { checkNeedsClarification } = require('./features_adapter');
       _needsClarification = await checkNeedsClarification(userMessage);
@@ -499,11 +506,21 @@ async function runAgentLoop(userMessage, config) {
     }
   }
   if (_needsClarification) {
-    // Inject clarification instruction into this turn only
+    // Inject clarification instruction into this turn only — record the index
+    // so we can splice it out after the model responds, otherwise it persists
+    // in history and re-fires on every subsequent turn.
     conversationHistory.push({ role: 'user', content: userMessage });
+    const _clarifierIdx = conversationHistory.length;
     conversationHistory.push({ role: 'system', content: getClarificationInstruction() });
-    // Let the model ask for clarification (no tools, just respond)
     const response = await chatCompletion(config, conversationHistory);
+    // Always remove the one-shot clarifier instruction whether the model responded or not
+    if (_clarifierIdx >= 0 && _clarifierIdx < conversationHistory.length) {
+      const msg = conversationHistory[_clarifierIdx];
+      if (msg && msg.role === 'system' && typeof msg.content === 'string' &&
+          msg.content.includes('vague')) {
+        conversationHistory.splice(_clarifierIdx, 1);
+      }
+    }
     const message = response?.choices?.[0]?.message;
     if (message?.content) {
       conversationHistory.push({ role: 'assistant', content: message.content });
@@ -620,21 +637,25 @@ async function runAgentLoop(userMessage, config) {
   // Zero tokens, zero latency — compiled from marrow/tool_router.marrow
   try {
     const { classifyToolCategory, categoryNeedsTools } = require('../src/compiled/tool_router');
-    // Affirmation guard: short confirmation messages (yes/ok/sure/go/proceed)
-    // should NOT reclassify the turn as 'respond' — that would strip all tools
-    // right after the model proposed an action it now wants to execute. Keep the
-    // prior turn's category so the model still has the right tools available.
-    const isAffirmation = /^(yes|y|yep|yeah|sure|ok|okay|go|proceed|do it|continue|please|please do|alright|👍|✅)\b\s*\.?\s*$/i.test(userMessage.trim());
-    if (isAffirmation && currentToolCategory && currentToolCategory !== 'respond') {
+    // Affirmation guard: short confirmation messages (yes/ok/sure/go/proceed/
+    // option N / work on N / first/second/etc.) should NOT reclassify the turn
+    // as 'respond' — that would strip all tools right after the model proposed
+    // an action it now wants to execute. Keep the prior turn's category so the
+    // model still has the right tools available.
+    const trimmedMsg = userMessage.trim();
+    const isAffirmation = /^(yes|y|yep|yeah|sure|ok|okay|go|proceed|do it|continue|please|please do|alright|👍|✅)\b\s*\.?\s*$/i.test(trimmedMsg);
+    const isContinuationRef = /^(option\s+\d|work\s+on\s+\d|do\s+\d|start\s+with\s+\d|\d+\.?\s*$|first|second|third|fourth|that|this|the\s+last|next)\b/i.test(trimmedMsg) && trimmedMsg.length < 30;
+    const shouldKeepCategory = isAffirmation || isContinuationRef;
+    if (shouldKeepCategory && currentToolCategory && currentToolCategory !== 'respond') {
       // Keep the existing category — don't re-classify
-      if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `${currentToolCategory} (kept — affirmation)`);
+      if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `${currentToolCategory} (kept — continuation)`);
     } else {
       const routeResult = classifyToolCategory(userMessage);
-      // If user said yes/ok and the previous category was respond/null, default
-      // to 'plan' which gives a broad tool set so the model can execute.
-      if (isAffirmation && (!currentToolCategory || currentToolCategory === 'respond')) {
+      // If user said yes/ok/option-N and the previous category was respond/null,
+      // default to 'plan' which gives a broad tool set so the model can execute.
+      if (shouldKeepCategory && (!currentToolCategory || currentToolCategory === 'respond')) {
         currentToolCategory = 'plan';
-        if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `plan (affirmation default)`);
+        if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `plan (continuation default)`);
       } else {
         currentToolCategory = routeResult.category;
         if (_fullscreenRef && routeResult.confidence > 0.3) {

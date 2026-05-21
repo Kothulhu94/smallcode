@@ -65,24 +65,33 @@ function applyThinkingBudget(body, options = {}) {
 
   // Detect provider from URL so we only send fields that provider accepts.
   // OpenAI's production API rejects unknown top-level parameters with HTTP 400.
+  // LM Studio accepts unknown fields silently but logs warnings about
+  // "No valid custom reasoning fields" if reasoning_effort is sent for a model
+  // that doesn't support it — wasting cycles on translation attempts.
   const isOpenAICloud = baseUrl.includes('api.openai.com') || baseUrl.includes('openrouter.ai');
   const isAnthropic = baseUrl.includes('anthropic.com') || baseUrl.includes('claude');
-  const isLocalLlamaCpp = !isOpenAICloud && !isAnthropic; // LM Studio, Ollama, llama.cpp
+  // LM Studio defaults to localhost:1234, often exposed on LAN as 192.168.x.x or 10.x.x.x
+  // We can't reliably distinguish LM Studio from raw llama.cpp, so we use the
+  // model name as a stronger signal for whether reasoning fields are appropriate.
+  const isLocalLlamaCpp = !isOpenAICloud && !isAnthropic;
 
   // Anthropic-style: { thinking: { type: "enabled", budget_tokens: N } }
-  // Only send to Anthropic or local servers (local servers ignore unknown fields).
-  if (isAnthropic || isLocalLlamaCpp) {
+  // Send to: Anthropic itself (where it's the actual API) or local reasoning models.
+  // Skip for non-reasoning local models — LM Studio logs warnings about
+  // "no valid custom reasoning fields" otherwise, and the model can't use it anyway.
+  if (isAnthropic || (isLocalLlamaCpp && /(o1|o3|qwen3|qwq|deepseek-r|claude-3-7|claude-4)/.test(String(body.model || '').toLowerCase()))) {
     body.thinking = opts.disable
       ? { type: 'disabled' }
       : { type: 'enabled', budget_tokens: Math.max(0, tokens) };
   }
 
-  // OpenAI o1/o3-style reasoning_effort — only for OpenAI cloud endpoints and local.
-  // GPT-5.5 and earlier standard models (gpt-4o etc.) do NOT accept this field.
-  // Only safe to send when model name starts with 'o1' / 'o3' / 'o4'.
+  // OpenAI o1/o3-style reasoning_effort — only for actual reasoning models.
+  // GPT-5.5, gpt-4o, and most local models do NOT support it. LM Studio logs
+  // warnings when we send it to a non-reasoning model. Only send when the
+  // model name strongly suggests it's a reasoning variant.
   const modelName = String(body.model || '').toLowerCase();
-  const isReasoningModel = /^(o1|o3|o4|claude-3-7|qwen3|qwen-3|deepseek-r|deepseek-v)/.test(modelName);
-  if (isReasoningModel || isLocalLlamaCpp) {
+  const isReasoningModel = /(^|[\/\-_])(o1|o3|o4|qwen3|qwq|deepseek-r|deepseek-v3-reason|claude-3-7|claude-4)/.test(modelName);
+  if (isReasoningModel) {
     if (!opts.disable) {
       if (tokens <= 500) body.reasoning_effort = 'low';
       else if (tokens <= 3000) body.reasoning_effort = 'medium';
@@ -93,7 +102,8 @@ function applyThinkingBudget(body, options = {}) {
   }
 
   // Qwen/llama.cpp-style fields — local only, never send to OpenAI/Anthropic cloud.
-  if (isLocalLlamaCpp) {
+  // Only send when model name suggests it actually understands these fields.
+  if (isLocalLlamaCpp && isReasoningModel) {
     body.chat_template_kwargs = body.chat_template_kwargs || {};
     body.chat_template_kwargs.enable_thinking = !opts.disable;
     if (!opts.disable) {
