@@ -1514,13 +1514,20 @@ function buildCompactSystemPrompt(taskType, messages) {
   // burning tool calls on discovery.
   let bootstrapLine = '';
   try {
-    if (_bootstrapDetector) bootstrapLine = _bootstrapDetector.formatForPrompt();
+    if (_bootstrapDetector) {
+      const raw = _bootstrapDetector.formatForPrompt();
+      // Prefix as a workspace hint so the model treats it as tool context,
+      // not as a project description to regurgitate when users ask questions.
+      // Without this framing models answer "tell me about the project" from
+      // the bootstrap summary instead of reading README.md.
+      if (raw) bootstrapLine = raw.replace('\n\nProject:', '\n\nWorkspace context:');
+    }
   } catch {}
 
   let prompt = `You are SmallCode, a coding agent. Working directory: ${process.cwd()}
 OS: ${os}${osHint}${bootstrapLine}
 
-Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it.`;
+Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it. If asked about the project, read README.md or relevant files — do not answer from the workspace context line above.`;
 
   // Only add tool-use instructions for tasks that need tools
   if (taskType !== 'explanation') {
