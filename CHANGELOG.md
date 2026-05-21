@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.9.2] - 2026-05-21
+
+### Large file write corruption fix (root cause)
+
+The `json.exception.parse_error.101` llama.cpp 500 error when writing large
+JSX/React files is now fully resolved:
+
+- `write_file` hard-capped at 8KB / ~60 lines — returns a chunking strategy
+  hint instead of silently corrupting
+- New `append_file` tool: build large files in chunks without hitting the JSON
+  parse limit. Write a skeleton with `write_file`, fill sections with `append_file`
+- `create_and_run` now has the same 8KB guard
+- System prompt explicitly tells the model to use skeleton + append pattern for
+  files over 60 lines
+- Regex fallback extractor retained as last resort on JSON.parse failure
+
+### MarrowScript Feature #1 — Compiled intent clarifier
+
+`checkNeedsClarification()` in `bin/features_adapter.js` replaces the hand-rolled
+regex in `src/session/clarify.js` with a compiled LLM classifier from
+`src/compiled/features/prompts.js`:
+- Cached 30 min by message hash — repeated identical vague prompts are instant
+- Only fires on messages under 80 chars (no latency overhead on detailed prompts)
+- Falls back to regex on model unavailability — never blocks
+
+### MarrowScript Feature #2 — Compiled commit message generator
+
+`generateCommitMessage()` in `bin/features_adapter.js` replaces the
+`smallcode: <truncated task>` string in the auto-commit block with a proper
+conventional commit message:
+- Format: `feat:|fix:|chore:|docs:` prefix validated, under 72 chars
+- Cached 1h by task hash
+- Falls back to truncation on model failure
+
+### Community
+- CJK/wide character cursor position fix in TUI input (PR #25 by @nashixiong926)
+
 ## [0.9.0] - 2026-05-21
 
 ### Feature #17 — Smart File-Tree Pruning
