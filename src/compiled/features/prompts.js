@@ -56,6 +56,13 @@ const TEMPLATES = {
 
   validate_edit: (file_path, content, original_task) =>
     `Review this edit to ${file_path}. Task was: ${original_task}. Does the code look correct? Reply with 'ok' if it looks good, or describe any issues.\n\n${content}`,
+
+  // MarrowScript Feature #1: intent_clarifier
+  // Replaces regex heuristics in src/session/clarify.js with a compiled
+  // classifier. Returns exactly "clear" or "vague" — constrained output.
+  // Cached 30m by message hash so repeated identical prompts are instant.
+  intent_clarifier: (user_message) =>
+    `Is this coding task request clear enough to act on, or is it too vague?\n\nA request is VAGUE if it lacks a specific target (e.g. "fix it", "make it better", "do the thing").\nA request is CLEAR if it specifies what to do, even if brief (e.g. "run tests", "fix the null check in auth.js", "add logging").\n\nReply with ONLY one word: "clear" or "vague"\n\nRequest: "${user_message.replace(/"/g, '\\"').slice(0, 300)}"`,
 };
 
 // ─── Core fetch helper ────────────────────────────────────────────────────────
@@ -117,7 +124,9 @@ async function callPrompt(name, input, ctx) {
 
   const rendered = tmpl(...Object.values(input));
   const cacheKey = _deriveKey(name, rendered);
-  const ttlMs = name === 'summarize_file' ? 3600000 : 600000; // 1h for summaries, 10m others
+  const ttlMs = name === 'summarize_file' ? 3600000 :
+                name === 'intent_clarifier' ? 1800000 : // 30m — per MarrowScript declaration
+                600000;
 
   const hit = _cacheGet(cacheKey);
   if (hit !== null) return hit;
@@ -134,6 +143,7 @@ const PROMPTS = {
   repair_tool_call: (input, ctx) => callPrompt('repair_tool_call', input, ctx),
   summarize_file: (input, ctx) => callPrompt('summarize_file', input, ctx),
   validate_edit: (input, ctx) => callPrompt('validate_edit', input, ctx),
+  intent_clarifier: (input, ctx) => callPrompt('intent_clarifier', input, ctx),
 };
 
 function getPrompt(name) {
