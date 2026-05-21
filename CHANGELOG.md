@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.9.8] - 2026-05-21
+
+### fix: clarifier fires on replies to assistant questions (root cause fix)
+
+**Root cause:** the clarifier evaluated every message in isolation. When the model
+asked the user a question (e.g. "Do you want me to read, implement, or analyze?"),
+the user's reply — however short ("read it", "1 and 2", "go ahead") — was still
+passed through `checkNeedsClarification` and falsely flagged as vague, creating a
+clarification loop.
+
+**Fix:** before running any clarifier logic, check whether the last assistant
+message in `conversationHistory` ended with `?`. If it did, the user is answering
+a question — skip the clarifier entirely, regardless of message length or content.
+
+Also kept the phrase/pattern guards as a defence-in-depth layer, and added
+`looksLikeMultiSelect` for "1 and 2" / "1, 2" patterns.
+
+Files changed:
+- `bin/smallcode.js` — `assistantAskedQuestion` context guard added as first condition
+- `src/session/clarify.js` — updated docblock to document the context-aware guard
+
+---
+
+## [0.9.7] - 2026-05-21
+
+### fix: clarifier + router + LM Studio reasoning fields
+
+- Clarifier instruction now spliced out after one turn (no more lingering system prompt)
+- Added path/option-ref/affirmation guards to skip clarifier on actionable short inputs
+- Router affirmation guard extended to option-references (`work on 2`) with `shouldKeepCategory`
+- Thinking/reasoning fields gated by model name pattern — Gemma gets a clean body, Qwen3/o1/etc get full reasoning fields
+
+---
+
 ## [0.9.3] - 2026-05-21
 
 ### MarrowScript Features Rank 2–8

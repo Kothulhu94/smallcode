@@ -493,10 +493,20 @@ async function runAgentLoop(userMessage, config) {
   // - Looks like a file path (quoted, contains slash/backslash, has extension)
   // - Pure number or "option N" / "work on N" — context-reference to prior options
   // - Affirmation in continuation context (yes/ok/sure/proceed)
+  // - ROOT CAUSE FIX: assistant's last turn ended with a question — user reply is an answer,
+  //   not a new task. Evaluate messages in context, not in isolation.
+  const lastAssistantMsg = [...conversationHistory].reverse().find(m => m.role === 'assistant');
+  const assistantAskedQuestion = typeof lastAssistantMsg?.content === 'string' && lastAssistantMsg.content.trimEnd().endsWith('?');
   const looksLikePath = /[\\\/]|\.\w{1,5}\s*$|^["'].*["']$/.test(userMessage.trim());
   const looksLikeOptionRef = /^(option\s+\d|work\s+on\s+\d|do\s+\d|start\s+with\s+\d|^\d+\.?\s*$|first|second|third|fourth)\b/i.test(userMessage.trim());
-  const looksLikeAffirmation = /^(yes|y|yep|yeah|sure|ok|okay|go|proceed|do it|continue|please|alright|👍|✅)\b\s*\.?\s*$/i.test(userMessage.trim());
-  if (userMessage.length < 80 && !looksLikePath && !looksLikeOptionRef && !looksLikeAffirmation) {
+  // Multi-number selection (e.g. "1 and 2", "1, 2", "both 1 and 2")
+  const looksLikeMultiSelect = /^(both\s+)?\d+(\s*,\s*|\s+and\s+)\d+$/i.test(userMessage.trim());
+  const looksLikeAffirmation = (
+    /^(yes|y|yep|yeah|sure|ok|okay|go|proceed|do it|continue|please|alright|👍|✅)\b\s*\.?\s*$/i.test(userMessage.trim()) ||
+    // Multi-word continuations: "go ahead", "go ahead and read it", "read it", "do that", "that one"
+    /^(go ahead|go for it|just do it|do that|do both|read it|show me|that one|sounds good|let's do it|let's go|that works)\b/i.test(userMessage.trim())
+  );
+  if (userMessage.length < 80 && !assistantAskedQuestion && !looksLikePath && !looksLikeOptionRef && !looksLikeMultiSelect && !looksLikeAffirmation) {
     try {
       const { checkNeedsClarification } = require('./features_adapter');
       _needsClarification = await checkNeedsClarification(userMessage);

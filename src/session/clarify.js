@@ -5,11 +5,16 @@
 // Triggers ONLY when:
 // - Prompt matches a specific vague pattern (not just being short)
 // - Multiple interpretations are genuinely possible
+// - The last assistant message did NOT end with a question (context-aware guard
+//   lives in smallcode.js — if the assistant asked a question, the user's reply
+//   is an answer, not a new task, regardless of how short it is)
 //
 // Does NOT trigger on:
 // - Short but actionable commands ("run tests", "fix bug", "add logging")
 // - Greetings ("hi", "hello") — model should respond naturally
 // - Confirmations ("yes", "no", "ok") — these answer the model's questions
+// - Multi-word follow-ups ("go ahead", "read it") — continuation phrases
+// - Multi-number selections ("1 and 2") — answering a numbered list
 
 /**
  * Check if a user message is too vague to act on.
@@ -23,6 +28,12 @@ function needsClarification(message) {
 
   // Never trigger on confirmations (these are answers to prior model questions)
   if (/^(yes|no|ok|sure|go|do it|y|n|yep|nope|yeah|nah)$/i.test(msg)) return false;
+
+  // Never trigger on multi-word continuations and follow-ups
+  if (/^(go ahead|go for it|just do it|do that|do both|read it|show me|that one|sounds good|let's do it|let's go|that works)\b/i.test(msg)) return false;
+
+  // Never trigger on multi-number selections ("1 and 2", "1, 2", "both 1 and 2")
+  if (/^(both\s+)?\d+(\s*,\s*|\s+and\s+)\d+$/i.test(msg)) return false;
 
   // Vague patterns that genuinely lack specifics and need clarification
   const vaguePatterns = [
