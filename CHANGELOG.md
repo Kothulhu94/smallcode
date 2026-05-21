@@ -2,6 +2,23 @@
 
 ## [0.9.0] - 2026-05-21
 
+### Feature #17 — Smart File-Tree Pruning
+
+New module `src/tools/file_tree.js`. `find_files` without a glob pattern and
+the `list_projects` fallback now use scored file ranking instead of dumping
+everything. On large repos (1000+ files), this prevents the model from
+receiving an unusable wall of filenames.
+
+Scoring: +3 modified <24h, +2 modified <7d, +2 source extension, +1 config
+file, +1 test file, -2 generated output, keyword bonus from task hint.
+Default cap: 50 files. Skips `node_modules/`, `dist/`, `__pycache__/` etc.
+Allows `.marrow` directories (MarrowScript source).
+
+Configure: `SMALLCODE_FILETREE_MAX`, `SMALLCODE_FILETREE_SORT=mtime|score`.
+
+**Audit fixes:** eliminated double directory walk in `formatSmartListing`;
+`.marrow` directories no longer skipped by dot-prefix filter.
+
 ### Feature #16 — Diff-Based Context
 
 New module `src/session/file_state.js`. When `SMALLCODE_DIFF_CONTEXT=true`,

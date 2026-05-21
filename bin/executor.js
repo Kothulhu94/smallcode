@@ -325,6 +325,14 @@ async function executeTool(name, args, ctx) {
 
     case 'find_files': {
       try {
+        // Smart listing (Feature #17): if no glob pattern, use scored file tree
+        // instead of dumping everything. With a pattern, use rg as before.
+        if (!args.pattern || args.pattern === '*' || args.pattern === '**') {
+          const { formatSmartListing } = require('../src/tools/file_tree');
+          const hint = args.hint || ''; // caller can pass a hint for keyword scoring
+          const listing = formatSmartListing(cwd, hint, { max: 50 });
+          return { result: listing };
+        }
         const cmd = 'rg --files --glob ' + escapeShellArg(String(args.pattern || ''))
           + ' --glob ' + escapeShellArg('!node_modules')
           + ' --glob ' + escapeShellArg('!.git');
@@ -349,10 +357,14 @@ async function executeTool(name, args, ctx) {
         } catch (e) { return { result: listResult.content[0]?.text || 'Failed to parse repo list.' }; }
       }
       try {
+        const { formatSmartListing } = require('../src/tools/file_tree');
+        const listing = formatSmartListing(process.cwd(), '', { max: 40 });
+        return { result: `Files in ${process.cwd()}:\n${listing}` };
+      } catch {
         const entries = fs.readdirSync(process.cwd(), { withFileTypes: true });
         const dirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules');
         return { result: `Projects in ${process.cwd()}:\n${dirs.map(d => `  - ${d.name}/`).join('\n')}` };
-      } catch { return { result: 'Could not list projects.' }; }
+      }
     }
 
     case 'graph_search': {
