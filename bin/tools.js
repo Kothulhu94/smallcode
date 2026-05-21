@@ -94,4 +94,4 @@ function getAllTools(config, stage2Category, deps = {}) {
   return allTools;
 }
 
-module.exports = { TOOLS, COMPOUND_TOOLS, getAllTools };
+module.exports = { TOOLS, COMPOUND_TOOLS, PROVIDER_TOOLS, getAllTools };
