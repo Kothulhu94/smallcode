@@ -620,10 +620,27 @@ async function runAgentLoop(userMessage, config) {
   // Zero tokens, zero latency — compiled from marrow/tool_router.marrow
   try {
     const { classifyToolCategory, categoryNeedsTools } = require('../src/compiled/tool_router');
-    const routeResult = classifyToolCategory(userMessage);
-    currentToolCategory = routeResult.category;
-    if (_fullscreenRef && routeResult.confidence > 0.3) {
-      _fullscreenRef.addTool('router', 'ok', `${routeResult.category} (${Math.round(routeResult.confidence * 100)}%)`);
+    // Affirmation guard: short confirmation messages (yes/ok/sure/go/proceed)
+    // should NOT reclassify the turn as 'respond' — that would strip all tools
+    // right after the model proposed an action it now wants to execute. Keep the
+    // prior turn's category so the model still has the right tools available.
+    const isAffirmation = /^(yes|y|yep|yeah|sure|ok|okay|go|proceed|do it|continue|please|please do|alright|👍|✅)\b\s*\.?\s*$/i.test(userMessage.trim());
+    if (isAffirmation && currentToolCategory && currentToolCategory !== 'respond') {
+      // Keep the existing category — don't re-classify
+      if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `${currentToolCategory} (kept — affirmation)`);
+    } else {
+      const routeResult = classifyToolCategory(userMessage);
+      // If user said yes/ok and the previous category was respond/null, default
+      // to 'plan' which gives a broad tool set so the model can execute.
+      if (isAffirmation && (!currentToolCategory || currentToolCategory === 'respond')) {
+        currentToolCategory = 'plan';
+        if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `plan (affirmation default)`);
+      } else {
+        currentToolCategory = routeResult.category;
+        if (_fullscreenRef && routeResult.confidence > 0.3) {
+          _fullscreenRef.addTool('router', 'ok', `${routeResult.category} (${Math.round(routeResult.confidence * 100)}%)`);
+        }
+      }
     }
   } catch {
     currentToolCategory = null; // Fall back to all tools
