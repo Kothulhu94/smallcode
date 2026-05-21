@@ -157,6 +157,29 @@ async function retrieveContext(userMessage, mcpCall, maxFiles = 8) {
 }
 
 /**
+ * Extract structured plan steps from any text format using LLM.
+ * MarrowScript Feature #3: replaces regex-based parsePlan() in plan_tracker.js
+ * with a compiled classifier that handles prose-embedded plans.
+ *
+ * @param {string} response - Model response that may contain a plan
+ * @returns {Promise<string[]|null>} array of step strings, or null
+ */
+async function extractPlanSteps(response) {
+  const prompts = _getPrompts();
+  if (!prompts) return null;
+  try {
+    const traceId = require('crypto').randomUUID();
+    const result = await prompts.callPrompt('extract_plan', { response }, { trace_id: traceId });
+    const clean = String(result).trim().replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '');
+    const parsed = JSON.parse(clean);
+    if (!Array.isArray(parsed) || parsed.length < 2) return null;
+    return parsed.slice(0, 8).map(s => String(s).slice(0, 200));
+  } catch {
+    return null; // fall back to regex parser in plan_tracker.js
+  }
+}
+
+/**
  * Generate a conventional commit message for the auto-commit feature.
  * MarrowScript Feature #2: replaces the hand-rolled string truncation in
  * the auto-commit block of runAgentLoop.
@@ -241,6 +264,110 @@ async function validateEditCompiled(filePath, content, originalTask) {
   }
 }
 
+// ─── Feature Rank 4: diagnoseError ───────────────────────────────────────────
+
+/**
+ * Analyze a bash command failure and return a structured hint.
+ * MarrowScript Rank 4: replaces ad-hoc error string formatting.
+ * Cached 5m. Falls back to null on model failure.
+ *
+ * @param {string} command  - The command that failed
+ * @param {string} stderr   - Combined stdout+stderr output
+ * @param {number|string} exitCode
+ * @returns {Promise<{type:string,file:string|null,line:number|null,suggestion:string}|null>}
+ */
+async function diagnoseError(command, stderr, exitCode) {
+  const prompts = _getPrompts();
+  if (!prompts) return null;
+  try {
+    const traceId = require('crypto').randomUUID();
+    const result = await prompts.callPrompt('error_diagnosis', {
+      command: String(command).slice(0, 500),
+      stderr: String(stderr).slice(0, 1500),
+      exit_code: String(exitCode),
+    }, { trace_id: traceId });
+    const clean = String(result).trim().replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '');
+    const parsed = JSON.parse(clean);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      type: String(parsed.type || 'unknown'),
+      file: parsed.file || null,
+      line: typeof parsed.line === 'number' ? parsed.line : null,
+      suggestion: String(parsed.suggestion || '').slice(0, 200),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Feature Rank 5: decomposeTask ───────────────────────────────────────────
+
+/**
+ * Ask the model for a decomposition strategy when a task keeps failing.
+ * MarrowScript Rank 5: LLM-based replacement for pickDecomposeStrategy().
+ * Cached 5m. Returns null on failure so callers fall back to governor's regex.
+ *
+ * @param {string} task        - User's original task description
+ * @param {string} errors      - Concatenated error messages
+ * @param {string} fileContext - Relevant file content snippet
+ * @returns {Promise<{strategy:string,reason:string,instruction:string}|null>}
+ */
+async function decomposeTask(task, errors, fileContext) {
+  const prompts = _getPrompts();
+  if (!prompts) return null;
+  try {
+    const traceId = require('crypto').randomUUID();
+    const result = await prompts.callPrompt('decompose_task', {
+      task: String(task),
+      errors: String(errors),
+      file_context: String(fileContext),
+    }, { trace_id: traceId });
+    const clean = String(result).trim().replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '');
+    const parsed = JSON.parse(clean);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const validStrategies = ['split_file', 'one_error_at_a_time', 'rewrite_section', 'extract_function'];
+    return {
+      strategy: validStrategies.includes(parsed.strategy) ? parsed.strategy : 'rewrite_section',
+      reason: String(parsed.reason || '').slice(0, 300),
+      instruction: String(parsed.instruction || '').slice(0, 600),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Feature Rank 7: semanticMerge ───────────────────────────────────────────
+
+/**
+ * Recover from a patch failure by asking the model to merge the intended
+ * change into the current file content.
+ * MarrowScript Rank 7: called when old_str is not found in patch case.
+ * TTL 1m (content-specific — caching rarely helps).
+ *
+ * @param {string} filePath       - File being patched
+ * @param {string} intendedChange - Description of what the patch was trying to do
+ * @param {string} currentContent - Current file content
+ * @returns {Promise<string|null>} New complete file content, or null on failure
+ */
+async function semanticMerge(filePath, intendedChange, currentContent) {
+  const prompts = _getPrompts();
+  if (!prompts) return null;
+  try {
+    const traceId = require('crypto').randomUUID();
+    const result = await prompts.callPrompt('semantic_merge', {
+      file: filePath,
+      intended_change: String(intendedChange),
+      current_content: String(currentContent),
+    }, { trace_id: traceId });
+    const text = String(result).trim();
+    // Strip any accidental code fences the model may have added
+    const stripped = text.replace(/^```[^\n]*\n/, '').replace(/\n```$/, '');
+    return stripped.length > 0 ? stripped : null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Availability check ───────────────────────────────────────────────────────
 
 /**
@@ -263,5 +390,9 @@ module.exports = {
   validateEditCompiled,
   checkNeedsClarification,
   generateCommitMessage,
+  extractPlanSteps,
+  diagnoseError,
+  decomposeTask,
+  semanticMerge,
   isFeaturesAvailable,
 };

@@ -165,6 +165,27 @@ class PlanTracker {
     return false;
   }
 
+  /**
+   * Async version of ingestResponse using MarrowScript Feature #3 (extract_plan).
+   * Tries the compiled LLM extractor first — handles plans embedded in prose.
+   * Falls back to the regex parsePlan() on failure.
+   */
+  async ingestResponseAsync(text) {
+    if (!this.shouldInject || this.plan) return false;
+    // Try LLM extractor first
+    try {
+      const { extractPlanSteps } = require('../bin/features_adapter');
+      const steps = await extractPlanSteps(text);
+      if (steps && steps.length >= DEFAULT_MIN_STEPS) {
+        this.plan = steps.slice(0, DEFAULT_MAX_STEPS);
+        this.currentStep = 0;
+        return true;
+      }
+    } catch {}
+    // Fallback to regex
+    return this.ingestResponse(text);
+  }
+
   /** Mark step N (0-indexed) as complete. */
   completeStep(n) {
     if (n >= 0 && n < (this.plan?.length || 0)) {

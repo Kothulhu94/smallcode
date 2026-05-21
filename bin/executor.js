@@ -236,7 +236,31 @@ async function executeTool(name, args, ctx) {
       // Snapshot for auto-rollback (Feature 9). No-op if no checkpoint open.
       try { getSnapshotManager({ workdir: cwd }).note(filePath, content); } catch {}
       const count = content.split(args.old_str).length - 1;
-      if (count === 0) return { error: `old_str not found in ${args.path}` };
+      if (count === 0) {
+        // MarrowScript Rank 7: semantic_merge — recover from old_str not found
+        try {
+          const { semanticMerge } = require('./features_adapter');
+          if (semanticMerge) {
+            const merged = await semanticMerge(args.path, args.new_str, content);
+            if (merged && merged.length > 0) {
+              // Strip ANSI codes from model-returned content before writing to disk
+              const { stripAnsi: _stripAnsiMerge } = require('../src/security/sanitize');
+              const cleanMerged = _stripAnsiMerge ? _stripAnsiMerge(merged) : merged;
+              fs.writeFileSync(filePath, cleanMerged);
+              try { getFileStateTracker().recordWrite(filePath, cleanMerged); } catch {}
+              const oldLines = content.split('\n').length;
+              const newLines = cleanMerged.split('\n').length;
+              if (_fullscreenRef) {
+                _fullscreenRef.addDiff(args.path, content.slice(0, 200), cleanMerged.slice(0, 200), 1);
+              } else {
+                showMiniDiff(tui, args.path, content.slice(0, 200), cleanMerged.slice(0, 200), 1);
+              }
+              return { result: `Patched ${args.path} via semantic merge (${oldLines} → ${newLines} lines)`, action: 'Edited', path: args.path, line: 1 };
+            }
+          }
+        } catch {}
+        return { error: `old_str not found in ${args.path}` };
+      }
       if (count > 1) return { error: `old_str matches ${count} locations. Include more context.` };
       content = content.replace(args.old_str, args.new_str);
       fs.writeFileSync(filePath, content);
@@ -263,9 +287,13 @@ async function executeTool(name, args, ctx) {
         command = _rtkRewrite(command);
       }
 
-      // Detect commands that start long-running servers (will block and timeout)
-      const blockingPatterns = /^(node|python|python3|ruby|php|go run|deno run|bun run)\s+.*\b(server|app|index|main)\b/i;
-      const explicitServers = /\b(express|fastify|flask|django|uvicorn|gunicorn|rails\s+s|npm\s+start|yarn\s+start|npm\s+run\s+dev)\b/i;
+      // Detect commands that start long-running servers (will block and timeout).
+      // IMPORTANT: only block on actual server indicators — NOT generic filenames
+      // like main.py, index.js which are standard entry points that run and exit.
+      // Match: files explicitly named *server*, *app* (as standalone), or framework
+      // scripts that are always blocking (uvicorn, gunicorn, etc.)
+      const blockingPatterns = /^(node|python|python3|ruby|php|go run|deno run|bun run)\s+.*\b(server\.(js|py|rb|php|ts)|app\.(js|py|rb|php|ts))\b/i;
+      const explicitServers = /\b(uvicorn|gunicorn|rails\s+s|npm\s+start|yarn\s+start|npm\s+run\s+dev|python3?\s+-m\s+(flask|django|uvicorn|aiohttp\.web|fastapi)|puma|unicorn|passenger)\b/i;
       if (blockingPatterns.test(command) || explicitServers.test(command)) {
         // Check if it's actually a --check or test command (those are fine)
         if (!command.includes('--check') && !command.includes('--version') && !command.includes('test')) {
@@ -324,7 +352,19 @@ async function executeTool(name, args, ctx) {
             return { result: trimmed, error: result.error, command };
           }
           if (result.exitCode !== 0) {
-            return { result: trimmed || '(no output)', error: `Exit code ${result.exitCode}`, command };
+            // MarrowScript Rank 4: error_diagnosis — structured hint prepended to result
+            let diagHint = '';
+            try {
+              const { diagnoseError } = require('./features_adapter');
+              if (diagnoseError) {
+                const diag = await diagnoseError(command, result.stdout || '', result.exitCode);
+                if (diag && diag.suggestion) {
+                  const loc = diag.file ? ` in ${diag.file}${diag.line ? ':' + diag.line : ''}` : '';
+                  diagHint = `[ERROR-DIAGNOSIS] Type: ${diag.type}${loc}. Fix: ${diag.suggestion}\n\n`;
+                }
+              }
+            } catch {}
+            return { result: diagHint + (trimmed || '(no output)'), error: `Exit code ${result.exitCode}`, command };
           }
           return { result: trimmed || '(no output)', command };
         } catch (e) {
@@ -351,7 +391,21 @@ async function executeTool(name, args, ctx) {
           const lines = safeOutput.split('\n').slice(0, 8);
           for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
         }
-        return { result: safeOutput.slice(0, 2000) || sanitizeToolOutput(e.message || ''), error: exitReason, command };
+        // MarrowScript Rank 4: error_diagnosis — structured hint for execSync fallback too
+        let diagHint = '';
+        if (e.status !== null && e.status !== undefined) {
+          try {
+            const { diagnoseError } = require('./features_adapter');
+            if (diagnoseError) {
+              const diag = await diagnoseError(command, safeOutput, e.status);
+              if (diag && diag.suggestion) {
+                const loc = diag.file ? ` in ${diag.file}${diag.line ? ':' + diag.line : ''}` : '';
+                diagHint = `[ERROR-DIAGNOSIS] Type: ${diag.type}${loc}. Fix: ${diag.suggestion}\n\n`;
+              }
+            }
+          } catch {}
+        }
+        return { result: diagHint + (safeOutput.slice(0, 2000) || sanitizeToolOutput(e.message || '')), error: exitReason, command };
       }
     }
 
@@ -497,9 +551,9 @@ async function executeTool(name, args, ctx) {
           output += `\n⚠ File contains interactive input calls (input/readline/stdin). Skipping execution — the script would hang waiting for user input. Use node --check or python -c "import py_compile; py_compile.compile('${args.path}')" to verify syntax instead.`;
           return { result: output, action: 'Created', path: args.path, lines };
         }
-        // Also check for server-start patterns
-        const blockingPatterns = /^(node|python|python3|ruby|php)\s+.*\b(server|app)\b/i;
-        const explicitServers = /\b(express|fastify|flask|django|uvicorn|npm\s+start)\b/i;
+        // Also check for server-start patterns (same conservative matching as bash case)
+        const blockingPatterns = /^(node|python|python3|ruby|php)\s+.*\b(server\.(js|py|rb|php)|app\.(js|py|rb|php))\b/i;
+        const explicitServers = /\b(uvicorn|gunicorn|flask|django|express|fastify|npm\s+start)\b/i;
         if (blockingPatterns.test(args.command) || explicitServers.test(args.command)) {
           if (!args.command.includes('--check') && !args.command.includes('test')) {
             output += `\n⚠ Command would start a long-running server. Skipping execution.`;

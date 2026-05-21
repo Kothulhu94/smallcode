@@ -1,6 +1,104 @@
 # Changelog
 
-## [0.9.2] - 2026-05-21
+## [0.9.3] - 2026-05-21
+
+### MarrowScript Features Rank 2–8
+
+Eight new MarrowScript features implemented across the core agent loop,
+plus 100 deep analysis passes resulting in 10 real bug fixes.
+
+#### Rank 2: code_intel tool category
+New `code_intel` category in `src/compiled/tool_router.js`. Detects "how does X work",
+"what calls Y", inheritance, callers, and call-graph questions. Routes to
+`[graph_search, explain_symbol, read_file, find_files, search]`. Added to PRIORITY
+array before `search` for tie-breaking.
+
+#### Rank 3: verify_and_fix module
+New `src/compiled/features/verify_and_fix.js` encapsulates the improvement loop
+previously inline in `smallcode.js`. Handles: self-critique, runValidation, fix
+prompts, decompose, escalation, auto-rollback. Falls back to inline logic if
+module unavailable.
+
+#### Rank 4: error_diagnosis prompt
+New `error_diagnosis` template in `src/compiled/features/prompts.js` (TTL 5m).
+Exported as `diagnoseError()` from `bin/features_adapter.js`. Wired into
+`executor.js` bash case (both persistent shell and execSync fallback): on non-zero
+exit, calls `diagnoseError` and prepends a structured hint `[ERROR-DIAGNOSIS]` to
+the tool result so the model has typed, located, and actionable error info.
+
+#### Rank 5: decompose_task prompt
+New `decompose_task` template (TTL 5m). Exported as `decomposeTask()`. Replaces
+the two `pickDecomposeStrategy()` calls in the `smallcode.js` improvement loop
+with an LLM-based strategy selector. Falls back to the regex governor on model
+unavailability.
+
+#### Rank 6: multi_file_edit coordination
+New `src/compiled/features/multi_file_edit.js`. Exported as
+`coordinateMultiFileEdit()`. When the model edits 3+ files in a single turn,
+injects a `[MULTI-FILE-EDIT]` coordination header listing all files so the model
+doesn't drift. Opens a snapshot checkpoint for the edit group. De-duplicates
+via recent-history scan.
+
+#### Rank 7: semantic_merge prompt
+New `semantic_merge` template (TTL 1m, content-specific). Exported as
+`semanticMerge()`. Wired into `executor.js` patch case: when `old_str not found`,
+calls the model to merge the intended change into the current file content before
+returning the error. Result is ANSI-stripped before writing to disk.
+
+#### Rank 8: adaptive_model_select
+New `src/model/adaptive_router.js` — `AdaptiveModelRouter` class + singleton
+`getAdaptiveRouter()`. Tracks per-model failure rates (fails/calls). Wired into
+`chatCompletion` in `smallcode.js`: overrides `body.model` when failure rate > 0.6
+(uses `SMALLCODE_MODEL_STRONG`) or > 0.3 (uses `SMALLCODE_MODEL_MEDIUM`).
+Requires at least 3 calls before routing decisions kick in. Records success/failure
+after each API response.
+
+### Bug fixes from 100 deep analysis passes
+
+1. **Variable shadowing** — `result` variable in the decompose wiring in
+   `smallcode.js` (both file and bash paths) shadowed the outer tool-call `result`.
+   Renamed to `decomposeResult`.
+
+2. **Dead code / logic error** — `mergeAttempted` flag in `executor.js` patch case
+   was initialized `false` and never set `true`, causing the fallback error message
+   to always show. Simplified to a single try/catch with direct early return.
+
+3. **Wrong MCP method** — `context_retriever.js` called `mcpCall('graph_walk', ...)`
+   (non-existent method) instead of `mcpCall('tools/call', { name: 'search_graph' })`.
+   The context retriever silently returned empty results for every user message.
+
+4. **Wrong MCP response format** — Same file parsed the raw response as a plain
+   string instead of extracting `content[].text` from the MCP `tools/call` envelope.
+
+5. **Unsafe JSON.parse in Anthropic escalation** — `escalation.js`
+   `_callAnthropic()` called `JSON.parse(tc.function.arguments)` inside a `map()`
+   callback without try/catch. Invalid arguments from small models could throw
+   uncaught and crash the escalation flow.
+
+6. **Stale hardcoded MCP version** — `mcp_bridge.js` sent `version: '0.4.19'`
+   (old version) in the MCP `initialize` handshake. Fixed to read from
+   `package.json`.
+
+7. **Stale hardcoded TUI version** — `tui.js` `renderWelcome()` displayed
+   `v0.1.0`. Fixed to read from `package.json`.
+
+8. **Redundant require inside loop** — `smallcode.js` improvement loop called
+   `const fs = require('fs')` and `const path = require('path')` inside the
+   hot path despite both being required at module top. Removed.
+
+9. **Missing ANSI sanitization on model-generated file content** — `executor.js`
+   semantic merge wrote the model's returned file content directly to disk without
+   stripping ANSI codes. Fixed with `stripAnsi`.
+
+10. **Missing error_diagnosis in execSync fallback** — The `diagnoseError` hint
+    was only injected in the persistent shell path, not the `execSync` fallback.
+    Now both paths call `diagnoseError` on non-zero exits.
+
+### Benchmark
+- Smoke: 5/5 (100%)
+- Polyglot-mini: 19/19 (100%)
+
+
 
 ### Large file write corruption fix (root cause)
 

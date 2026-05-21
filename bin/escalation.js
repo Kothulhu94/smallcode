@@ -169,12 +169,16 @@ ${systemPromptExtra}`,
         if (m.tool_calls) {
           return {
             role: 'assistant',
-            content: m.tool_calls.map(tc => ({
-              type: 'tool_use',
-              id: tc.id,
-              name: tc.function.name,
-              input: JSON.parse(tc.function.arguments || '{}'),
-            })),
+            content: m.tool_calls.map(tc => {
+              let inputArgs = {};
+              try { inputArgs = JSON.parse(tc.function.arguments || '{}'); } catch { inputArgs = {}; }
+              return {
+                type: 'tool_use',
+                id: tc.id,
+                name: tc.function.name,
+                input: inputArgs,
+              };
+            }),
           };
         }
         return { role: m.role, content: m.content };

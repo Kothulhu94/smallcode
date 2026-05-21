@@ -24,7 +24,7 @@ async function retrieveContext(userMessage, mcpCall, maxFiles = 8) {
     // Search top 3 keywords to avoid over-fetching
     for (const kw of keywords.slice(0, 3)) {
       try {
-        const r = await mcpCall('graph_walk', { anchor: kw, hop_depth: 2, max_tokens: 2000 });
+        const r = await mcpCall('tools/call', { name: 'search_graph', arguments: { query: kw, max_tokens: 2000 } });
         if (r && !r.error) results.push(r);
       } catch {}
     }
@@ -35,7 +35,13 @@ async function retrieveContext(userMessage, mcpCall, maxFiles = 8) {
     const fileSet = new Set();
     const symbolSet = new Set();
     for (const r of results) {
-      const text = typeof r === 'string' ? r : JSON.stringify(r);
+      // Handle MCP tools/call format: { content: [{ text: '...' }] }
+      let text;
+      if (r && r.content && Array.isArray(r.content)) {
+        text = r.content.map(c => c.text || '').join('\n');
+      } else {
+        text = typeof r === 'string' ? r : JSON.stringify(r);
+      }
       // Extract file paths from graph results
       const pathMatches = text.match(/[a-zA-Z0-9_\-/\\]+\.(ts|js|py|rs|go|java|c|cpp|md)/g) || [];
       for (const p of pathMatches.slice(0, maxFiles)) fileSet.add(p);

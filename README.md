@@ -203,6 +203,30 @@ When the improvement loop retries a failed edit, each attempt uses a different t
 ### Per-Tool Trust Score Decay
 Tracks consecutive failures per tool within a session. Tools that fail 3+ times in a row are soft-demoted (schema list back). Tools that fail 5+ times are dropped from the schema entirely for the session. Prevents the model from looping on a broken MCP server or a search that keeps returning nothing. Resets between runs. Disable with `SMALLCODE_TRUST_DECAY=false`.
 
+### Code Intel Category (Rank 2)
+A new `code_intel` tool routing category detects semantic code questions ("how does X work", "what calls Y", "who inherits from Z"). Routes exclusively to `[graph_search, explain_symbol, read_file, find_files, search]` — skipping write/run tools. Placed before `search` in the priority order so inheritance/callers questions get the right tools without any write noise.
+
+### Error Diagnosis (Rank 4)
+When a bash command exits non-zero, `diagnoseError()` makes a quick LLM call to classify the error type (`syntax|runtime|permission|notfound|timeout|unknown`), locate the relevant file/line, and emit a one-line fix suggestion. The structured hint is prepended as `[ERROR-DIAGNOSIS]` to the tool result so the model has typed, located context to act on immediately. Cached 5 min. TTL configurable.
+
+### Decompose Task (Rank 5)
+`decomposeTask()` replaces the hand-rolled `pickDecomposeStrategy()` regex when a file keeps failing after all retries. The LLM selects a strategy (`split_file|one_error_at_a_time|rewrite_section|extract_function`) with a reason and concrete 2-3 sentence instruction. Falls back to the regex governor. Cached 5 min.
+
+### Multi-File Edit Coordination (Rank 6)
+When 3 or more files are edited in a single agent turn, `coordinateMultiFileEdit()` injects a `[MULTI-FILE-EDIT]` header listing all files that need changes. Keeps small models from forgetting file 3 while editing file 2. De-duplicates: only injects once per turn even if called repeatedly.
+
+### Semantic Merge (Rank 7)
+When `patch` fails because `old_str` no longer exists in the file, `semanticMerge()` asks the model to merge the intended change into the current file content. Returns the complete corrected file. Replaces the hard error with a recovery attempt. TTL 1 min (content-specific).
+
+### Adaptive Model Select (Rank 8)
+`AdaptiveModelRouter` in `src/model/adaptive_router.js` tracks per-model call/fail counts. When the primary model's failure rate exceeds 0.3 (medium) or 0.6 (strong), `chatCompletion` automatically overrides `body.model` with `SMALLCODE_MODEL_MEDIUM` or `SMALLCODE_MODEL_STRONG`. Requires at least 3 calls before routing decisions activate. Reset via `router.reset()`.
+
+```bash
+# Optional: configure fallback models for adaptive routing
+SMALLCODE_MODEL_MEDIUM=qwen2.5-coder:32b
+SMALLCODE_MODEL_STRONG=gpt-4o
+```
+
 ### Benchmark Harness
 Run the included benchmark suite against any local model to measure pass rate across small coding tasks. Three suites: `smoke` (5 trivial tasks, ~30s), `polyglot-mini` (19 tasks across Python/JS/TS/Bash/Markdown/JSON), `tool-use` (10 multi-step tool sequencing tasks). Results persisted to `.smallcode/benchmarks/`.
 

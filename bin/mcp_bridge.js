@@ -100,10 +100,20 @@ async function initCodeGraph(version) {
   const child = startCodeGraphMCP();
   if (!child) return false;
 
+  // Use actual package version if not provided
+  let resolvedVersion = version;
+  if (!resolvedVersion) {
+    try {
+      const pkg = require('../package.json');
+      resolvedVersion = pkg.version;
+    } catch {}
+    if (!resolvedVersion) resolvedVersion = '0.9.2';
+  }
+
   const initResult = await mcpCall('initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'smallcode', version: version || '0.4.19' },
+    clientInfo: { name: 'smallcode', version: resolvedVersion },
   });
 
   if (!initResult) {
