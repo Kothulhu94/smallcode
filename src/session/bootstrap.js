@@ -50,6 +50,8 @@ class BootstrapDetector {
     const s = r.summary.length > this.maxChars
       ? r.summary.slice(0, this.maxChars - 1) + '…'
       : r.summary;
+    // Label as "Project" — caller may relabel as "Workspace context" to avoid
+    // models treating this as a complete project description.
     return `\n\nProject: ${s}`;
   }
 
@@ -88,8 +90,10 @@ class BootstrapDetector {
         if (scripts.start) parts.start = `${parts.pm} start`;
         else if (scripts.dev) parts.start = `${parts.pm} run dev`;
 
-        // Entry / main
-        if (pkg.main) parts.entry = pkg.main;
+        // Entry / main — prefer bin entries (CLIs) over main (library entry)
+        const bins = pkg.bin ? Object.values(pkg.bin) : [];
+        if (bins.length > 0) parts.entry = bins[0];
+        else if (pkg.main) parts.entry = pkg.main;
 
         // Framework hints from deps
         const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
