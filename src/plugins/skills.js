@@ -40,6 +40,7 @@ class SkillManager {
     return [
       path.join(this.projectDir, '.smallcode', 'skills'),
       path.join(os.homedir(), '.config', 'smallcode', 'skills'),
+      path.join(os.homedir(), '.smallcode', 'skills'),   // ~/.smallcode/skills/ alt
       path.join(__dirname, '..', '..', 'skills'),
     ];
   }
