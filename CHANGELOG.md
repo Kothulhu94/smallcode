@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.9.9] - 2026-05-22
+
+### feat: litecode architecture — query routing, path validation, dependency graph, parallel executor
+
+Four features from the litecode small-context agent design, adapted to SmallCode's architecture:
+
+**Feature 2 — Query routing (`src/session/action_classifier.js`)**
+Plan steps are now classified as `query` (read-only) or `mutate` (can write) before tool calls start. Query steps get a filtered tool set that excludes `write_file`, `patch`, `append_file`, `create_and_run`. Prevents "how many lines does X have?" from accidentally overwriting a file. Wired into `getAllTools()` in `bin/smallcode.js`.
+
+**Feature 4 — File path validation (`src/session/dependency_graph.js`)**
+After a plan is extracted, all file paths mentioned in plan steps are validated against the filesystem. Missing paths inject an advisory `[PATH-VALIDATION]` system message so the model self-corrects via `find_files` rather than silently misrouting. Non-blocking — new-file creation tasks reference paths that legitimately don't exist yet.
+
+**Feature 3 — Dependency graph orchestrator (`src/session/dependency_graph.js`)**
+Pure-code (zero LLM) dependency graph built from plan steps. Two steps touching the same file are marked dependent. Explicit ordering ("after step N") is also detected. Topological sort (Kahn's algorithm) produces parallel execution batches. Batch structure logged to TUI. Stored as `_planTracker._executionBatches` for use by the parallel executor.
+
+**Feature 1 — Parallel executor (`src/session/parallel_executor.js`)**
+Executes independent plan steps concurrently using `Promise.all` per batch. Per-file isolation: each parallel step sees only the shared system prompt + its own task instruction (no sibling results). Gated behind `SMALLCODE_PARALLEL=true` env var — off by default until validated in production. Full agent loop integration is v1.0.0 work.
+
+**Bug fixes in implementation:**
+- `lastIndex` race condition in path regex patterns (concurrent calls shared state)
+- Cycle detection fallback in topological sort could push empty batch
+- `buildStepMessages` now enforces system-only message isolation
+
+Files added: `src/session/action_classifier.js`, `src/session/dependency_graph.js`, `src/session/parallel_executor.js`
+Files changed: `bin/smallcode.js`
+
+---
+
 ## [0.9.8] - 2026-05-21
 
 ### fix: clarifier fires on replies to assistant questions (root cause fix)

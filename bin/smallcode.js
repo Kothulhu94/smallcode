@@ -426,13 +426,30 @@ async function executeTool(name, args) {
 // Tool definitions + routing loaded from bin/tools.js
 // getAllTools delegates to the module with plugin/mcp context.
 // Trust decay (Feature 13): dropped tools filtered from schema list.
+// Feature 2: Query routing — filter write tools for read-only plan steps.
 function getAllTools(config, stage2Category) {
   const tools = _getAllToolsModule(config, stage2Category, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
+  let filtered = tools;
+
+  // Feature 2: if plan is active and current step is a query, filter write tools
+  try {
+    if (_planTracker && _planTracker.plan && _planTracker.currentStep < _planTracker.plan.length) {
+      const { classifyAction, getToolsForActionType } = require('../src/session/action_classifier');
+      const currentStepText = _planTracker.plan[_planTracker.currentStep];
+      if (currentStepText) {
+        const actionType = classifyAction(currentStepText);
+        if (actionType === 'query') {
+          filtered = getToolsForActionType('query', tools);
+        }
+      }
+    }
+  } catch {}
+
   try {
     const { getTrustDecay } = require('../src/tools/trust_decay');
-    return getTrustDecay().filterAndSort(tools);
+    return getTrustDecay().filterAndSort(filtered);
   } catch {
-    return tools;
+    return filtered;
   }
 }
 let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS];
@@ -958,6 +975,28 @@ async function runAgentLoop(userMessage, config) {
               }
               _planInstructionIdx = -1;
             }
+
+            // Feature 4: validate file paths mentioned in the plan.
+            // Advisory only — injects a warning system message so the model
+            // can self-correct via find_files rather than hard-failing.
+            try {
+              const { validatePlanPaths, buildDependencyGraph, toParallelBatches, formatBatchSummary } = require('../src/session/dependency_graph');
+              const { missing } = validatePlanPaths(_planTracker.plan, process.cwd());
+              if (missing.length > 0) {
+                const warnMsg = `[PATH-VALIDATION] Plan references files that don't exist on disk: ${missing.join(', ')}. ` +
+                  `Use find_files or bash to locate the correct paths before proceeding.`;
+                conversationHistory.push({ role: 'system', content: warnMsg });
+                if (_fullscreenRef) _fullscreenRef.addTool('warning', 'warn', `missing paths: ${missing.join(', ')}`);
+              }
+
+              // Feature 3: build dependency graph and log batch structure to TUI
+              const graph = buildDependencyGraph(_planTracker.plan, process.cwd());
+              const batches = toParallelBatches(graph, _planTracker.plan.length);
+              _planTracker._executionBatches = batches;
+              if (_fullscreenRef && batches.length > 0) {
+                _fullscreenRef.addTool('plan', 'ok', formatBatchSummary(batches));
+              }
+            } catch {}
           }
         }
       } catch {}
@@ -1481,6 +1520,24 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
               }
               _planInstructionIdx = -1;
             }
+
+            // Feature 4 + 3: path validation + dependency graph (same as tool-call path)
+            try {
+              const { validatePlanPaths, buildDependencyGraph, toParallelBatches, formatBatchSummary } = require('../src/session/dependency_graph');
+              const { missing } = validatePlanPaths(_planTracker.plan, process.cwd());
+              if (missing.length > 0) {
+                const warnMsg = `[PATH-VALIDATION] Plan references files that don't exist on disk: ${missing.join(', ')}. ` +
+                  `Use find_files or bash to locate the correct paths before proceeding.`;
+                conversationHistory.push({ role: 'system', content: warnMsg });
+                if (_fullscreenRef) _fullscreenRef.addTool('warning', 'warn', `missing paths: ${missing.join(', ')}`);
+              }
+              const graph = buildDependencyGraph(_planTracker.plan, process.cwd());
+              const batches = toParallelBatches(graph, _planTracker.plan.length);
+              _planTracker._executionBatches = batches;
+              if (_fullscreenRef && batches.length > 0) {
+                _fullscreenRef.addTool('plan', 'ok', formatBatchSummary(batches));
+              }
+            } catch {}
           }
         }
       } catch {}
