@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.1] - 2026-05-22
+
+### fix: /model command sends auth headers
+
+The `/model` command was fetching `/models` without an `Authorization` header.
+OpenWebUI and other authenticated endpoints return non-2xx on unauthenticated
+requests, causing `/model` to always show `failed`. Now sends the same
+`Bearer` token used by all other SmallCode requests.
+
+---
+
 ## [1.0.0] - 2026-05-22
 
 ### feat: reliability hardening from mebassett fork — 1.0 release
