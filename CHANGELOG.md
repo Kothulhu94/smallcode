@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.2] - 2026-05-22
+
+### fix: empty tools array + ~/.smallcode/skills/ support
+
+- **OpenWebUI 400 fix** — `tools` key is now omitted from the request body when
+  there are no tools to send. OpenWebUI (and some other endpoints) reject
+  `"tools": []` with a `NoneType` error; the key must be absent entirely.
+- **`~/.smallcode/skills/`** — added as a recognized global skills directory
+  alongside `~/.config/smallcode/skills/`. Both paths now work.
+
+---
+
 ## [1.0.1] - 2026-05-22
 
 ### fix: /model command sends auth headers
