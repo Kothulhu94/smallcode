@@ -10,6 +10,8 @@ __pycache__/
 .memory/
 .smallcode/
 node_modules/
+jobs/
+.compare-modified.json
 
 # Prebuilt binary tarballs (shipped via GitHub releases, not npm)
 tmp*/
