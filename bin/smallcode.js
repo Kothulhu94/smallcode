@@ -2009,13 +2009,18 @@ async function chatCompletion(config, messages) {
       };
     });
 
+    const _tools = getAllTools(config, currentToolCategory);
     const body = {
       model: config.model.name,
       messages: [systemMsg, ...processedWithImages],
-      tools: getAllTools(config, currentToolCategory),
       temperature: 0.1,
       max_tokens: parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS) || 8192,
     };
+    // Only include tools when there are tools to send — some endpoints (OpenWebUI)
+    // error on an empty tools array rather than treating it as "no tools".
+    if (_tools && _tools.length > 0) {
+      body.tools = _tools;
+    }
 
     // Multi-model chaining (Feature #15): override model name with executor
     // if chain config is active. No-op when SMALLCODE_CHAIN is not set.
