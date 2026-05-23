@@ -1,10 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [1.1.0] - 2026-05-23
 
-### fix: /version slash command + tool-call extraction for qwen2.5-coder
+### feat: tool-call recovery + /version command + SSRF guard hardening
 
-Two reported issues fixed.
+Two issues closed (#36, #40), one external security PR merged (#39).
 
 - **Issue #40 — `/version` returns "Unknown"** — `/version` (and `/v`) now
   print the SmallCode version, package description, and Node/platform info.
@@ -24,9 +24,32 @@ Two reported issues fixed.
 
   Conservative by design — calls referencing unknown tool names are left in
   the chat content rather than executed.
+- **PR #39 — SSRF guard bypasses (security)** — closes two adjacent gaps in
+  the SSRF guard that let an LLM-controlled `web_fetch` URL reach cloud
+  metadata under `LLM_ALLOW_PUBLIC_ENDPOINTS=1`. Thanks to @aaronjmars for
+  the report and patch.
+  - IPv4-mapped IPv6 aliases (`[::ffff:169.254.169.254]`,
+    `[::ffff:a9fe:a9fe]`, `[0:0:0:0:0:ffff:169.254.169.254]`) now route
+    through `hostVariants()` and hit `isAlwaysBlocked` like the dotted-quad
+    form already did.
+  - `_fetchWithBrowser` (Playwright path) now intercepts every per-hop
+    request via `page.route` and re-asserts the SSRF guard, so a 302 to a
+    metadata IP is rejected before connect — matching the existing
+    `redirect: 'manual'` defence in `_fetchSimple`.
+  - The `.ts` and `.js` ssrf_guard sources are now in sync, so a future
+    `node build.js` won't regress the fix. Origin-equality matching
+    replaces the prior `endpoint.startsWith(allow)` (prefix-spoof angle).
+  - 14 new regression tests in `test/ssrf_guard.test.js`.
 
-  Coverage: `.test-workspace/tool_call_extractor_test.js` (10 cases) and
-  `.test-workspace/version_command_test.js` (3 cases).
+### Verification
+
+- 10/10 tool-call extractor cases (qwen tag, fenced JSON, bare JSON,
+  OpenAI-shape, multi-call, unknown-tool rejection, trailing commas, prose
+  passthrough, already-structured passthrough, `{tool, args}` variant)
+- 3/3 `/version` cases (command, alias, unknown-passthrough)
+- 14/14 SSRF guard cases including all five metadata aliases
+- Existing 11/11 TUI unit tests still pass
+- CI green on Linux, macOS, Windows
 
 ---
 
