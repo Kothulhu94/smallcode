@@ -43,8 +43,6 @@ class PluginLoader {
     this.providers = {};    // name → IModelProvider instance
     this.initHandlers = [];   // async init handlers from plugin manifests
     this.shutdownHandlers = []; // async shutdown handlers from plugin manifests
-    this.permissions = {};   // plugin name → { read, write, execute, network }
-    this.mcpServers = {};    // plugin name → { serverName: { command, args, transport } }
     this.errors = [];       // { dir, message } for diagnostics
   }
 
@@ -209,31 +207,6 @@ class PluginLoader {
         }
       }
 
-      // Register permissions
-      if (manifest.permissions) {
-        this.permissions[plugin.name] = {
-          read: !!manifest.permissions.read,
-          write: !!manifest.permissions.write,
-          execute: !!manifest.permissions.execute,
-          network: !!manifest.permissions.network,
-        };
-      } else {
-        // Default: read-only, no write/execute/network
-        this.permissions[plugin.name] = { read: true, write: false, execute: false, network: false };
-      }
-
-      // Register MCP server declarations
-      if (manifest.mcpServers) {
-        this.mcpServers[plugin.name] = {};
-        for (const [serverName, serverDef] of Object.entries(manifest.mcpServers)) {
-          this.mcpServers[plugin.name][serverName] = {
-            command: serverDef.command,
-            args: serverDef.args || [],
-            transport: serverDef.transport || 'stdio',
-          };
-        }
-      }
-
       this.plugins.push(plugin);
     } catch (e) {
       // Store error for diagnostics, but don't crash
@@ -301,29 +274,9 @@ class PluginLoader {
     return null;
   }
 
-  // Get permissions for a plugin
-  getPermissions(pluginName) {
-    return this.permissions[pluginName] || null;
-  }
-
-  // Check if a plugin has a specific permission
-  hasPermission(pluginName, perm) {
-    const p = this.permissions[pluginName];
-    return p ? !!p[perm] : false;
-  }
-
-  // Get all MCP server declarations across plugins
-  getMCPServers() {
-    const servers = {};
-    for (const [plugin, pluginServers] of Object.entries(this.mcpServers)) {
-      for (const [name, def] of Object.entries(pluginServers)) {
-        servers[`${plugin}/${name}`] = def;
-      }
-    }
-    return servers;
-  }
-
   // Get error diagnostics for failed plugin loads
+  // TODO: re-add getPermissions(), hasPermission(), getMCPServers() when
+  // permissions enforcement is wired into the tool execution pipeline.
   getErrors() {
     return this.errors;
   }
