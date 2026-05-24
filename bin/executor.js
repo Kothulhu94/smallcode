@@ -748,7 +748,6 @@ async function executeTool(name, args, ctx) {
 
     case 'configure_provider': {
       const { runWizard } = require('./provider-wizard/wizard');
-      const { configureProvider: activateProvider } = require('../src/compiled/providers/registry');
       const hasAnyParam = args.provider || args.baseUrl || args.model || args.apiKey;
       let result;
       if (!hasAnyParam) {
@@ -765,7 +764,6 @@ async function executeTool(name, args, ctx) {
         });
       }
       if (result.success) {
-        try { activateProvider(); } catch {}
         return { result: `Provider configured: ${result.provider} (${result.baseUrl}) model=${result.model}${result.escalation ? ` escalation=${result.escalation}` : ''}. Restart SmallCode to apply.` };
       }
       return { error: result.error };

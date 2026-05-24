@@ -2586,12 +2586,13 @@ async function main() {
 
   // Initialize plugins early so they can handle setup (e.g. /provider wizard)
   pluginLoader = new PluginLoader(process.cwd()).loadAll();
+  await pluginLoader.runInit({ config, cwd: process.cwd() });
   skillManager = new SkillManager(process.cwd());
 
   // Check model is configured
   if (!config.model.name) {
     // Allow /provider commands even without a model configured
-    const providerArg = positional.find(a => a.startsWith('/provider') || a === 'provider');
+    const providerArg = positional.find(a => a === '/provider' || a === '/provider/status' || a === 'provider');
     if (providerArg) {
       const cmd = providerArg.startsWith('/') ? providerArg : '/provider';
       const rest = positional.filter(a => a !== providerArg).join(' ');
@@ -2618,10 +2619,6 @@ async function main() {
       config.context.detected_window = modelProfile.context_length;
     }
   }
-
-  // Initialize plugins and skills
-  pluginLoader = new PluginLoader(process.cwd()).loadAll();
-  await pluginLoader.runInit({ config, cwd: process.cwd() });
 
   // Run plugin shutdown handlers on exit
   process.on('beforeExit', () => {

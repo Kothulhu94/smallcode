@@ -232,8 +232,8 @@ async function runWizard(options = {}) {
       }
     }
 
-    // Step 7: Write provider config to global env (~/.config/smallcode/smallcode.env)
-    // so it persists across projects. Project .env can still override.
+    // Step 7: Write provider config
+    // Ask the user where to save (global vs project-only).
     const envVars = {
       SMALLCODE_PROVIDER: provider,
       SMALLCODE_BASE_URL: baseUrl,
@@ -243,15 +243,38 @@ async function runWizard(options = {}) {
       envVars[providerInfo.keyEnv] = apiKey;
     }
 
-    // Always write to global config
-    try {
-      fs.mkdirSync(globalConfigDir, { recursive: true });
-      const globalMerged = mergeEnvFile(globalEnvPath, envVars);
-      fs.writeFileSync(globalEnvPath, globalMerged, 'utf-8');
-    } catch {}
+    let writeGlobal = false;
+    let writeProject = false;
 
-    // Also write to project .env if it exists or if we're in the project root
-    if (fs.existsSync(envPath) || fs.existsSync(tomlPath)) {
+    if (isInteractive) {
+      const scopeQ = providerInfo.keyEnv && apiKey
+        ? `  Save config to? (API key will be included)`
+        : `  Save config to?`;
+      console.log('');
+      console.log(`  ${scopeQ}`);
+      console.log('    1. Global (~/.config/smallcode/.env) — available in all projects');
+      console.log('    2. Project only (./.env) — local to this project');
+      console.log('    3. Both');
+      const scopeChoice = await askNumber(rl, '  Choose:', ['Global', 'Project only', 'Both']);
+      if (scopeChoice === 0) { writeGlobal = true; }
+      else if (scopeChoice === 1) { writeProject = true; }
+      else { writeGlobal = true; writeProject = true; }
+    } else {
+      // Non-interactive: default to project-only to avoid silently persisting secrets
+      writeProject = true;
+    }
+
+    // Write to global config
+    if (writeGlobal) {
+      try {
+        fs.mkdirSync(globalConfigDir, { recursive: true });
+        const globalMerged = mergeEnvFile(globalEnvPath, envVars);
+        fs.writeFileSync(globalEnvPath, globalMerged, 'utf-8');
+      } catch {}
+    }
+
+    // Write to project .env
+    if (writeProject && (fs.existsSync(envPath) || fs.existsSync(tomlPath) || writeProject)) {
       const merged = mergeEnvFile(envPath, envVars);
       fs.writeFileSync(envPath, merged, 'utf-8');
     }
