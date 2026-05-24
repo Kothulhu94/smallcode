@@ -2176,6 +2176,15 @@ async function chatCompletion(config, messages) {
       }
     };
 
+    // Plugin hook: pre_request (before plugin provider check so it fires for all providers)
+    if (pluginLoader) {
+      await pluginLoader.runHooks('pre_request', {
+        provider: config.model.provider,
+        model: body.model || config.model.name,
+        messages: processedMessages,
+      });
+    }
+
     // Plugin-registered providers: call directly, bypass fetch
     const { providerRegistry } = require('../src/compiled/providers/registry');
     const pluginProvider = providerRegistry.get(config.model.provider);
@@ -2226,15 +2235,6 @@ async function chatCompletion(config, messages) {
         if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `${config.model.provider}: ${msg.slice(0, 80)}`);
         return null;
       }
-    }
-
-    // Plugin hook: pre_request
-    if (pluginLoader) {
-      await pluginLoader.runHooks('pre_request', {
-        provider: config.model.provider,
-        model: body.model || config.model.name,
-        messages: processedMessages,
-      });
     }
 
     let response;
