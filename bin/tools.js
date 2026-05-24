@@ -44,6 +44,9 @@ const COMPOUND_TOOLS = [
 ];
 
 // ─── Provider Tools ──────────────────────────────────────────────────────────
+// Provider tools (like configure_provider) are only sent to the model when
+// SMALLCODE_PROVIDER is not configured. When a provider is already set, the
+// model doesn't need to know about provider configuration at all.
 
 const PROVIDER_TOOLS = [
   { type: 'function', function: { name: 'configure_provider', description: 'Configure a new AI provider (LM Studio, OpenRouter, Anthropic, OpenAI, DeepSeek, Ollama, or custom endpoint). Saves config to ~/.smallcode/.env and sets it as active.', parameters: { type: 'object', properties: { provider: { type: 'string', description: 'Provider name: lmstudio, openrouter, anthropic, openai, deepseek, ollama, or custom' } }, required: ['provider'] } } },

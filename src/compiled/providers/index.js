@@ -92,6 +92,12 @@ function listModelNames() {
  * Resolve a provider by name. Checks the plugin registry first;
  * falls back to creating a default OpenAICompatProvider with the
  * configured baseUrl.
+ *
+ * IMPORTANT: Do NOT register the fallback into providerRegistry here.
+ * resolveProvider() is a lookup, not a mutation. Registering the fallback
+ * would pollute the registry with an unintended entry under whatever name
+ * was passed in, causing later resolveProvider() calls to short-circuit
+ * to the plugin path and bypass the real OpenAI-compat fetch.
  */
 function resolveProvider(name) {
     const fromRegistry = registry_1.providerRegistry.get(name);

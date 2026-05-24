@@ -32,6 +32,9 @@ class AnthropicAdapter {
       } else if (msg.role === 'assistant') {
         const assistantMsg = { role: 'assistant', content: msg.content };
         if (msg.tool_calls && msg.tool_calls.length > 0) {
+          // SmallCode uses OpenAI ChatToolCall format:
+          //   { id, type: "function", function: { name, arguments } }
+          // Anthropic expects tool_use blocks with flat { id, name, input }.
           assistantMsg.content = [
             { type: 'text', text: msg.content || '' },
             ...msg.tool_calls.map(tc => ({
@@ -122,6 +125,9 @@ class AnthropicAdapter {
       if (block.type === 'text') {
         content += block.text;
       } else if (block.type === 'tool_use') {
+        // Convert Anthropic's flat tool_use block back to OpenAI ChatToolCall
+        // format: { id, type: "function", function: { name, arguments } }.
+        // SmallCode's executor expects this format for tool call routing.
         toolCalls.push({
           id: block.id,
           type: 'function',

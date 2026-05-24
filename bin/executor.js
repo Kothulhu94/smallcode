@@ -246,7 +246,12 @@ async function executeTool(name, args, ctx) {
       try { getSnapshotManager({ workdir: cwd }).note(filePath, content); } catch {}
       const count = content.split(args.old_str).length - 1;
       if (count === 0) {
-        // MarrowScript Rank 7: semantic_merge — recover from old_str not found
+        // MarrowScript Rank 7: semantic_merge — recover from old_str not found.
+        // When the model tries to patch a file but provides an old_str that
+        // doesn't exactly match (e.g. whitespace drift from tokenization),
+        // semanticMerge attempts a fuzzy reconstruction. The result is a full
+        // file replacement, not a surgical patch — acceptable as a fallback
+        // because the original old_str already failed to match.
         try {
           const { semanticMerge } = require('./features_adapter');
           if (semanticMerge) {

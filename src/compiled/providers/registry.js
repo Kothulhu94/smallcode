@@ -19,6 +19,10 @@ class ProviderRegistry {
     this.capabilities = new Map();
   }
 
+  // register() has a side effect: it permanently adds the provider to the
+  // in-memory Map. Callers must be intentional about when they register —
+  // resolveProvider() deliberately does NOT call register() to avoid
+  // polluting the registry with fallback entries.
   register(name, provider, caps) {
     this.providers.set(name, provider);
     this.capabilities.set(name, { ...DEFAULT_CAPABILITIES, ...caps });

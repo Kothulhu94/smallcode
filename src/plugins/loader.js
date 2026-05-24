@@ -97,6 +97,8 @@ class PluginLoader {
               description: toolDef.description || '',
               parameters: toolDef.parameters || { type: 'object', properties: {} },
             },
+            // Underscore-prefixed fields are consumed by executor.js when it
+            // dispatches plugin tool calls. The model never sees these.
             _handler: handler,
             _plugin: plugin.name,
           });
