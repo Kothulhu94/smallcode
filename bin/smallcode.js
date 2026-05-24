@@ -2691,7 +2691,7 @@ async function main() {
   }
 
   // Handle /provider even when model IS configured (must come before positional prompt)
-  const providerArg = positional.find(a => a.startsWith('/provider') || a === 'provider');
+  const providerArg = positional.find(a => a === '/provider' || a === '/provider/status' || a === 'provider');
   if (providerArg) {
     const cmd = providerArg.startsWith('/') ? providerArg : '/provider';
     const rest = positional.filter(a => a !== providerArg).join(' ');

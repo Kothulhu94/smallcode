@@ -37,8 +37,8 @@ class AnthropicAdapter {
             ...msg.tool_calls.map(tc => ({
               type: 'tool_use',
               id: tc.id,
-              name: tc.function?.name || tc.name,
-              input: JSON.parse(tc.function?.arguments || tc.arguments || '{}'),
+              name: tc.function.name,
+              input: JSON.parse(tc.function.arguments || '{}'),
             })),
           ];
         }
