@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### feat: per-tier endpoint routing
+
+`SMALLCODE_MODEL_FAST`, `SMALLCODE_MODEL_DEFAULT`, `SMALLCODE_MODEL_MEDIUM`,
+and `SMALLCODE_MODEL_STRONG` can now be paired with matching
+`SMALLCODE_BASE_URL_*` variables. `smallcode.toml` also supports
+`[models.fast]`, `[models.default]`, `[models.medium]`, and
+`[models.strong]` sections with `name` and `baseUrl`, so users can keep
+default work on localhost while routing larger tiers to OpenRouter.
+
+Complexity-based tier selection and adaptive failure-rate routing now resolve
+the matching endpoint per request (`activeModelTarget`). Auth headers follow
+the selected URL — OpenRouter keys and headers for cloud tiers, no auth for
+local endpoints. Primary `[model]` config remains env-first; TOML tier sections
+always merge; env tier vars override TOML.
+
+### Verification
+
+- 90/90 unit tests pass (`npm test`) — 7 new in `test/config_normalize.test.js`,
+  `test/model_routing.test.js`, and `test/provider_compat.test.js`
+
 ## [1.2.1] - 2026-05-24
 
 ### fix: provider compatibility — 7 bugs causing 400 errors on cloud/local LLMs

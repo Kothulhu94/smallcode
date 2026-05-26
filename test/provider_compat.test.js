@@ -13,7 +13,7 @@ const assert = require('node:assert/strict');
 
 // ─── Bug 7: provider-aware auth routing ─────────────────────────────────────
 
-const { buildAuthHeaders } = require('../bin/config');
+const { buildAuthHeaders, getModelTarget, withModelTarget } = require('../bin/config');
 
 test('buildAuthHeaders picks DEEPSEEK_API_KEY for api.deepseek.com', () => {
   const prev = { ...process.env };
@@ -90,6 +90,34 @@ test('buildAuthHeaders uses SMALLCODE_API_KEY for local endpoints when set', () 
   try {
     const h = buildAuthHeaders({ model: { baseUrl: 'http://10.0.0.20:1234/v1' } });
     assert.equal(h['Authorization'], 'Bearer sk-local');
+  } finally {
+    process.env = prev;
+  }
+});
+
+test('per-tier OpenRouter target gets OpenRouter auth without changing local target', () => {
+  const prev = { ...process.env };
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.SMALLCODE_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.DEEPSEEK_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'sk-router';
+  try {
+    const config = {
+      model: { name: 'local', baseUrl: 'http://localhost:11434/v1', provider: 'openai' },
+      models: {
+        strong: { name: 'openrouter/large', baseUrl: 'https://openrouter.ai/api/v1', provider: 'openai' },
+      },
+    };
+
+    const localHeaders = buildAuthHeaders(config);
+    assert.equal(localHeaders.Authorization, undefined);
+
+    const strongTarget = getModelTarget(config, 'strong');
+    const strongHeaders = buildAuthHeaders(withModelTarget(config, strongTarget));
+    assert.equal(strongHeaders.Authorization, 'Bearer sk-router');
+    assert.ok(strongHeaders['HTTP-Referer']);
+    assert.ok(strongHeaders['X-Title']);
   } finally {
     process.env = prev;
   }

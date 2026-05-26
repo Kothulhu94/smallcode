@@ -60,6 +60,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         } else {
           const newModel = parts.slice(1).join(' ');
           config.model.name = newModel;
+          delete config.activeModelTarget;
           console.log(`  ${chalk.green('✓')} Switched to ${chalk.cyan(newModel)}`);
         }
         console.log('');
@@ -73,6 +74,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
           console.log(chalk.gray('  Switch: /endpoint http://host:port/v1'));
         } else {
           config.model.baseUrl = parts[1];
+          delete config.activeModelTarget;
           console.log(`  ${chalk.green('✓')} Endpoint: ${chalk.gray(parts[1])}`);
         }
         console.log('');

@@ -9,6 +9,20 @@ baseUrl = "http://localhost:11434/v1"
 # tool_format = "hermes"
 # timeout = 300   # seconds to wait for model response (default: 300 / 5 min)
 
+# Optional tier routing. Each tier may use a different OpenAI-compatible
+# endpoint. If a tier omits baseUrl, it falls back to [model].baseUrl.
+# [models.fast]
+# name = "local-small"
+# baseUrl = "http://localhost:11434/v1"
+#
+# [models.default]
+# name = "gpt-oss:20b"
+# baseUrl = "http://localhost:11434/v1"
+#
+# [models.strong]
+# name = "openai/gpt-4o-mini"
+# baseUrl = "https://openrouter.ai/api/v1"
+
 [context]
 max_budget_pct = 70
 working_memory_tokens = 500

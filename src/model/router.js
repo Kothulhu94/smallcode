@@ -41,23 +41,27 @@ function estimateComplexity(message) {
   return 'default';
 }
 
+function routeTier(message) {
+  return estimateComplexity(message);
+}
+
 /**
  * Pick the model name based on configured tiers and estimated complexity.
  */
 function routeModel(message, config) {
   const models = config.models;
-  if (!models || !models.fast) {
+  if (!models) {
     // No multi-model config — use the single configured model
     return config.model.name;
   }
 
-  const complexity = estimateComplexity(message);
+  const complexity = routeTier(message);
 
   switch (complexity) {
-    case 'fast': return models.fast || models.default || config.model.name;
-    case 'strong': return models.strong || models.default || config.model.name;
-    default: return models.default || config.model.name;
+    case 'fast': return (models.fast?.name || models.fast) || (models.default?.name || models.default) || config.model.name;
+    case 'strong': return (models.strong?.name || models.strong) || (models.default?.name || models.default) || config.model.name;
+    default: return (models.default?.name || models.default) || config.model.name;
   }
 }
 
-module.exports = { estimateComplexity, routeModel };
+module.exports = { estimateComplexity, routeTier, routeModel };

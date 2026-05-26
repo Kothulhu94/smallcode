@@ -7,7 +7,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { buildAuthHeaders } = require('./config');
+const { buildAuthHeaders, getModelTarget, withModelTarget } = require('./config');
 const { redactString } = require('../src/security/sanitize');
 
 /**
@@ -16,7 +16,9 @@ const { redactString } = require('../src/security/sanitize');
  */
 async function chatCompletion(ctx) {
   const { config, conversationHistory, tokenTracker, sessionStore } = ctx;
-  const baseUrl = config.model.baseUrl;
+  const target = config.activeModelTarget || getModelTarget(config, 'default');
+  const requestConfig = withModelTarget(config, target);
+  const baseUrl = target.baseUrl;
 
   const systemMsg = {
     role: 'system',
@@ -28,13 +30,13 @@ async function chatCompletion(ctx) {
     const processedMessages = conversationHistory.map(msg => {
       if (msg.role !== 'user' || typeof msg.content !== 'string') return msg;
       const images = extractImages(msg.content, process.cwd());
-      if (images.length === 0 || !modelSupportsVision(config.model.name)) return msg;
+      if (images.length === 0 || !modelSupportsVision(target.model)) return msg;
       return { ...msg, content: [{ type: 'text', text: msg.content }, ...formatImagesForAPI(images)] };
     });
 
     const _tools = ctx.getAllTools(config);
     const body = {
-      model: config.model.name,
+      model: target.model,
       messages: [systemMsg, ...processedMessages],
       temperature: 0.1,
       max_tokens: 4096,
@@ -45,7 +47,7 @@ async function chatCompletion(ctx) {
       body.tools = _tools;
     }
 
-    const headers = buildAuthHeaders(config);
+    const headers = buildAuthHeaders(requestConfig);
 
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
@@ -72,7 +74,7 @@ async function chatCompletion(ctx) {
     const data = await response.json();
 
     if (tokenTracker && data?.usage) {
-      tokenTracker.record(data, config.model.name);
+      tokenTracker.record(data, target.model);
     }
     if (sessionStore) {
       sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
@@ -91,19 +93,21 @@ async function chatCompletion(ctx) {
  */
 async function streamFinalResponse(ctx) {
   const { config, earlyStop, _fullscreenRef } = ctx;
-  const baseUrl = config.model.baseUrl;
+  const target = config.activeModelTarget || getModelTarget(config, 'default');
+  const requestConfig = withModelTarget(config, target);
+  const baseUrl = target.baseUrl;
 
   const systemMsg = { role: 'system', content: 'You are SmallCode, a coding assistant. Summarize what you just did in 1-2 sentences. Be concise.' };
 
   try {
-    const headers = buildAuthHeaders(config);
+    const headers = buildAuthHeaders(requestConfig);
     const messages = ctx.conversationHistory;
 
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        model: config.model.name,
+        model: target.model,
         messages: [systemMsg, ...messages.slice(-6)],
         stream: true,
         temperature: 0.1,

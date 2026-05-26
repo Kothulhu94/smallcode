@@ -50,10 +50,39 @@ SMALLCODE_BASE_URL=http://localhost:1234/v1
 # 可选：模型升级（硬失败时自动回退到云端）
 # ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
+# OPENROUTER_API_KEY=sk-or-v1-...
 # DEEPSEEK_API_KEY=sk-...
 ```
 
 查看 `.env.example` 了解所有选项。同时支持 `smallcode.toml` 以保持向后兼容。
+
+SmallCode 可以为每个模型层级配置不同 endpoint。这样可以让 fast/default
+任务继续使用本地模型，而复杂任务使用 OpenRouter 上的更大模型：
+
+```bash
+SMALLCODE_MODEL=qwen3:8b
+SMALLCODE_BASE_URL=http://localhost:11434/v1
+
+SMALLCODE_MODEL_STRONG=openai/gpt-4o-mini
+SMALLCODE_BASE_URL_STRONG=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+等价的 `smallcode.toml`：
+
+```toml
+[model]
+provider = "openai"
+name = "qwen3:8b"
+baseUrl = "http://localhost:11434/v1"
+
+[models.strong]
+name = "openai/gpt-4o-mini"
+baseUrl = "https://openrouter.ai/api/v1"
+```
+
+层级 URL 是可选的。如果省略 `SMALLCODE_BASE_URL_STRONG` 或
+`[models.strong].baseUrl`，该层级会使用主 `baseUrl`。
 
 ## 架构
 
