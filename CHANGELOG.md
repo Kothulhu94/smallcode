@@ -1,5 +1,65 @@
 # Changelog
 
+## [1.2.4] - 2026-05-26
+
+### feat: read-guard + quality-monitor (itsy port) + skills auto-detect / CRLF (closes #52, #53)
+
+Two highest-ROI features ported from
+[jukefr/itsy](https://github.com/jukefr/itsy)'s analysis of little-coder
+(see itsy's `docs/little-coder-analysis.md`), plus two reported issues
+fixed. All four ship under feature flags so existing behaviour is
+preserved.
+
+- **Context-aware read guard** (`src/session/read_guard.js`,
+  `marrow/read_guard.marrow`). The previous fixed 8000-char tool-result
+  cap silently sliced files in half. The guard now estimates live
+  context usage via the conversation history; when usage is past the
+  budget OR the file alone exceeds 50% of the window, it returns the
+  first 30 lines (imports + signatures) plus an explicit "use grep /
+  read a smaller line range" directive instead of a head/tail slice
+  with no redirect. Falls back to a head/tail trim with a clearer
+  redirect hint for read-shaped tools (`read_file`, `find_and_read`,
+  `search_and_read`, `read_and_patch`); non-read tools keep the legacy
+  fixed cap. Disable with `SMALLCODE_READ_GUARD=false`. Tune head size
+  with `SMALLCODE_READ_GUARD_HEAD_LINES=30`.
+
+- **Quality monitor** (`src/governor/quality_monitor.js`,
+  `marrow/quality_monitor.marrow`). Catches four structural failure
+  modes per turn: empty response (no text + no tool calls), empty
+  tool name, hallucinated tool name (not in registry — emits closest
+  matches as suggestions), and exact-repeat tool call across turns.
+  On a hit it pushes a `[QUALITY-MONITOR]` steer into the
+  conversation and continues. Capped at 2 consecutive corrections to
+  prevent a correction spiral; on the third event the loop's other
+  guards (early_stop, escalation) take over. Disable with
+  `SMALLCODE_QUALITY_MONITOR=false`.
+
+- **Issue #53 — skills in `.agents/skills/<name>/SKILL.md` and
+  `.claude/skills/<name>/SKILL.md` are auto-detected.** SmallCode now
+  walks the itsy/jukefr and Claude Code nested layouts on top of its
+  flat `.smallcode/skills/*.md` discovery. Skills without YAML
+  frontmatter are accepted as `manual`-trigger skills named after
+  their parent directory.
+
+- **Issue #52 — skill files with CRLF line endings load on Windows.**
+  YAML frontmatter regex now tolerates both `\n` and `\r\n` between
+  the `---` delimiters.
+
+### Verification
+
+- 115/115 unit tests pass (`npm test`) — 33 new across
+  `test/skills.test.js`, `test/quality_monitor.test.js`,
+  `test/read_guard.test.js`.
+- Offline E2E harness at `test/e2e_offline.js` (run with
+  `npm run test:e2e:offline`) exercises CLI boot, SkillManager
+  auto-detection, read-guard wiring, quality-monitor wiring, and the
+  bin/smallcode.js parse path. All cases pass.
+- Live E2E (`npm run test:e2e`) is unchanged and still drives
+  `huihui-gemma-4-e4b-it-abliterated` against the configured
+  endpoint when one is reachable.
+
+---
+
 ## [1.2.3] - 2026-05-27
 
 ### fix: SMALLCODE_CACHE_SPLIT now defaults to true — fixes llama.cpp KV-cache invalidation loop
