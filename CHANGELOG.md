@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.2.3] - 2026-05-27
+
+### fix: SMALLCODE_CACHE_SPLIT now defaults to true — fixes llama.cpp KV-cache invalidation loop
+
+**Root cause:** `buildCompactSystemPrompt()` injected dynamic content (memory,
+knowledge, skills) into the system prompt on every turn. llama.cpp uses LCP
+(Longest Common Prefix) similarity to reuse KV-cache between requests. When
+the system prompt changes each turn, llama.cpp discards all context checkpoints
+and re-processes the full prompt from scratch — producing the infinite
+`erased invalidated context checkpoint` loop and making every turn as slow as
+the first.
+
+**Fix:** `SMALLCODE_CACHE_SPLIT` now defaults to `true` (was `false`). Dynamic
+context (memory, knowledge, skills) moves to a `<sc:context>` block prepended
+to the latest user message instead of the system prompt. The system prompt
+stays identical across turns → llama.cpp can cache it → checkpoints are
+preserved → subsequent turns are fast.
+
+This also benefits cloud providers (OpenAI, Anthropic) that do prefix caching
+on their side — a stable system prompt gets more cache hits.
+
+Set `SMALLCODE_CACHE_SPLIT=false` in `.env` to revert to the old behaviour.
+
+**llama.cpp server flags that also help** (from ggml-org/llama.cpp#19977):
+```
+--checkpoint-every-n-tokens 2048 --ctx-checkpoints 64
+```
+
+### Verification
+
+- 90/90 unit tests pass (`npm test`)
+
+---
+
 ## [1.2.2] - 2026-05-26
 
 ### feat: per-tier endpoint routing + SMALLCODE_SHOW_THINKING — closes #48 #50 #51

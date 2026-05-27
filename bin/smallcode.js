@@ -1844,10 +1844,14 @@ function runValidation(filePath) {
 // (memory, knowledge, plan, test runner) is moved into a [CONTEXT] block prepended to
 // the latest user message via buildDynamicContext().
 //
-// When SMALLCODE_CACHE_SPLIT=false (default for backwards compat), everything is in
-// the system prompt as before.
+// SMALLCODE_CACHE_SPLIT defaults to true. This prevents llama.cpp KV-cache
+// invalidation: when the system prompt changes every turn (because memory/knowledge
+// is injected into it), llama.cpp discards all context checkpoints and re-processes
+// the full prompt from scratch — causing the "erased invalidated context checkpoint"
+// loop. A stable system prompt lets llama.cpp reuse its KV cache across turns.
+// Set SMALLCODE_CACHE_SPLIT=false to revert to the old behaviour.
 function buildCompactSystemPrompt(taskType, messages) {
-  const cacheSplit = process.env.SMALLCODE_CACHE_SPLIT === 'true';
+  const cacheSplit = process.env.SMALLCODE_CACHE_SPLIT !== 'false'; // default: true
   const os = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
   const osHint = process.platform === 'win32' ? '\nUse "dir" not "ls", "type" not "cat". No bash-only commands.' : '';
 
@@ -1900,7 +1904,7 @@ CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. l
 // when SMALLCODE_CACHE_SPLIT=true. Returns '' when there's no dynamic content
 // or when cache-split is disabled.
 function buildDynamicContext(messages) {
-  if (process.env.SMALLCODE_CACHE_SPLIT !== 'true') return '';
+  if (process.env.SMALLCODE_CACHE_SPLIT === 'false') return ''; // default: enabled
   const parts = [
     // Memory + knowledge are query-dependent → move to user message (dynamic)
     getMemoryContext(messages),
