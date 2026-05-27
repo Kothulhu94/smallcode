@@ -33,6 +33,12 @@ const TOOLS = [
   { type: 'function', function: { name: 'contract_assert_skip', description: 'Mark an assertion as skipped (not applicable in current scope). Skipped assertions count as resolved for the done-guard.', parameters: { type: 'object', properties: { assertion_id: { type: 'string', description: 'Assertion id' }, reason: { type: 'string', description: 'Why this assertion is being skipped' } }, required: ['assertion_id', 'reason'] } } },
 ];
 
+// ─── Provider Tools ─────────────────────────────────────────────────────────
+const PROVIDER_TOOLS = [
+  { type: 'function', function: { name: 'configure_provider', description: 'Configure a provider: set provider type, base URL, model name, API key, and optional escalation fallback. Call without arguments to start the interactive wizard.', parameters: { type: 'object', properties: { provider: { type: 'string', description: 'Provider name: lmstudio, ollama, openrouter, openai, anthropic, deepseek, custom' }, baseUrl: { type: 'string', description: 'Provider base URL (e.g. http://localhost:1234/v1)' }, model: { type: 'string', description: 'Model name to use (e.g. llama-3.1-8b-instruct)' }, apiKey: { type: 'string', description: 'API key (optional, some providers require it)' }, escalationProvider: { type: 'string', description: 'Escalation fallback provider name (optional)' }, escalationModel: { type: 'string', description: 'Escalation fallback model name (optional)' } }, required: [] } } },
+  { type: 'function', function: { name: 'provider_status', description: 'Show current provider configuration status: which provider is active, base URL, model, escalation settings, and whether an API key is set.', parameters: { type: 'object', properties: {}, required: [] } } },
+];
+
 // ─── Compound Tools ──────────────────────────────────────────────────────────
 
 const COMPOUND_TOOLS = [
@@ -41,15 +47,6 @@ const COMPOUND_TOOLS = [
   { type: 'function', function: { name: 'find_and_read', description: 'Find files matching a pattern and read the first match. Equivalent to find_files + read_file in one call.', parameters: { type: 'object', properties: { pattern: { type: 'string', description: 'Glob pattern (e.g. **/main.ts, src/**/*.py)' }, read_lines: { type: 'integer', description: 'Max lines to show from matched file. Default: 50' } }, required: ['pattern'] } } },
   { type: 'function', function: { name: 'search_and_read', description: 'Search for a pattern in code, then read the most relevant file found. Equivalent to search + read_file in one call.', parameters: { type: 'object', properties: { pattern: { type: 'string', description: 'Regex to search for' }, read_context: { type: 'integer', description: 'Lines of context around matches. Default: 10' } }, required: ['pattern'] } } },
   { type: 'function', function: { name: 'run', description: 'Run an existing file (python, node, etc). Use this instead of create_and_run when the file already exists.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Command to run e.g. "python game.py" or "node server.js"' }, timeout: { type: 'integer', description: 'Timeout in seconds. Default: 30' } }, required: ['command'] } } },
-];
-
-// ─── Provider Tools ──────────────────────────────────────────────────────────
-// Provider tools (like configure_provider) are only sent to the model when
-// SMALLCODE_PROVIDER is not configured. When a provider is already set, the
-// model doesn't need to know about provider configuration at all.
-
-const PROVIDER_TOOLS = [
-  { type: 'function', function: { name: 'configure_provider', description: 'Configure a new AI provider (LM Studio, OpenRouter, Anthropic, OpenAI, DeepSeek, Ollama, or custom endpoint). Saves config to ~/.smallcode/.env and sets it as active.', parameters: { type: 'object', properties: { provider: { type: 'string', description: 'Provider name: lmstudio, openrouter, anthropic, openai, deepseek, ollama, or custom' } }, required: ['provider'] } } },
 ];
 
 // ─── Tool Routing ────────────────────────────────────────────────────────────
@@ -63,7 +60,7 @@ const PROVIDER_TOOLS = [
 function getAllTools(config, stage2Category, deps = {}) {
   const pluginTools = deps.pluginLoader ? deps.pluginLoader.getTools() : [];
   const mcpTools = deps.mcpClient ? deps.mcpClient.getToolDefs() : [];
-  const allTools = [...TOOLS, ...COMPOUND_TOOLS, ...pluginTools, ...mcpTools];
+  const allTools = [...TOOLS, ...COMPOUND_TOOLS, ...PROVIDER_TOOLS, ...pluginTools, ...mcpTools];
 
   // If a deterministic tool category was pre-classified, filter tools
   // This skips the LLM-based two_stage routing entirely

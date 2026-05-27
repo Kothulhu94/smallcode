@@ -215,6 +215,12 @@ SmallCode also auto-detects skills in two nested layouts already used by other a
 
 Skills loaded from these layouts are accepted without YAML frontmatter; the directory name becomes the skill name. Skill files with CRLF line endings now load correctly on Windows (closes #52).
 
+### Plugin System
+Plugins live under `.smallcode/plugins/<name>/` (project), `~/.smallcode/plugins/<name>/` (user), or `~/.config/smallcode/plugins/<name>/` (global). Each plugin has a `plugin.json` manifest declaring tools, commands, hooks, prompt injections, providers, permissions, and MCP servers. Five lifecycle hooks fire at the right points in the agent loop: `pre_request`, `post_request`, `on_error`, `session_start`, `session_end`. Plugin-contributed providers register with the `ProviderRegistry` and `resolveProvider()` looks them up by name before falling back to the OpenAI-compat adapter. An example Anthropic provider plugin ships in `.smallcode/plugins/anthropic-provider/`. Install with `/plugin install <pkg> [--scope project|user|global]`.
+
+### `/provider` — Interactive Provider Wizard
+Configure your LLM provider without hand-editing `.env`. The wizard walks through provider selection (LM Studio, Ollama, OpenRouter, OpenAI, Anthropic, DeepSeek, custom), base URL (with provider defaults), API key (probed against `/v1/models` to validate), model name, and an optional escalation fallback. Saves to `~/.config/smallcode/.env` (global), `./.env` (project), or both. Available as the `configure_provider` tool for the model and `/provider` (or `/provider status`) in the REPL.
+
 ### Quality Monitor (itsy port)
 Catches four structural failure modes per turn — empty turns, blank tool names, hallucinated tool names (returns closest matches as suggestions), and exact-repeat tool calls across turns. On a hit it injects a `[QUALITY-MONITOR]` steer back into the conversation; capped at 2 consecutive corrections to prevent spirals. Disable with `SMALLCODE_QUALITY_MONITOR=false`.
 
@@ -318,7 +324,8 @@ Reports mean reward delta, per-task pass-count moves (no task should regress), w
 | `/cognition` | Show MarrowScript cognition layer status |
 | `/mcp` | Show connected external MCP servers |
 | `/skill` | Manage reusable skills |
-| `/plugin` | Install/manage plugins |
+| `/plugin` | Install/manage plugins (`--scope project|user|global`) |
+| `/provider` | Configure LLM provider (interactive wizard) |
 | `/sessions` | List/resume saved sessions |
 | `/version`, `/v` | Show SmallCode version + Node/platform |
 | `/help` | Show all commands |

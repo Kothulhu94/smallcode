@@ -37,7 +37,8 @@ const fs = require('fs');
         // Don't override existing env vars
         if (!process.env[key]) process.env[key] = value;
       }
-      break; // Use first found .env file
+      // Don't break — load all env files so global config is always available.
+      // Project .env values take priority since they're loaded first (line 38 won't overwrite).
     } catch {}
   }
 })();
@@ -53,7 +54,7 @@ const {
   getModelTargetForModel,
   withModelTarget,
 } = require('./config');
-const { TOOLS, COMPOUND_TOOLS, getAllTools: _getAllToolsModule } = require('./tools');
+const { TOOLS, COMPOUND_TOOLS, PROVIDER_TOOLS, getAllTools: _getAllToolsModule } = require('./tools');
 const { runValidation: _runValidationModule } = require('./model_client');
 const { mcpCall, initCodeGraph, killMCP, getMcpProcess } = require('./mcp_bridge');
 const { executeTool: _executeToolModule } = require('./executor');
@@ -477,7 +478,7 @@ function getAllTools(config, stage2Category) {
     return filtered;
   }
 }
-let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS];
+let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS, ...PROVIDER_TOOLS];
 
 const MAX_TOOL_CALLS = 500;
 const MAX_IMPROVE_ITERATIONS = 2;
@@ -2852,17 +2853,70 @@ async function handleMCPToolCall(id, params) {
   return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: result }] }};
 }
 
+// ─── Minimal TUI (no model — plugin commands only) ──────────────────────────
+
+async function startMinimalTUI() {
+  const readline = require('readline');
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: chalk.cyan('smallcode> '),
+  });
+
+  const createCommandHandler = require('./commands');
+  const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, escalationEngine, null);
+
+  rl.prompt();
+
+  rl.on('line', async (line) => {
+    const input = line.trim();
+    if (!input) { rl.prompt(); return; }
+
+    if (input === '/exit' || input === '/quit') {
+      console.log(chalk.gray('\n  Goodbye.\n'));
+      rl.close();
+      process.exit(0);
+    }
+
+    if (input.startsWith('/')) {
+      await handleCmd(input, rl);
+      return;
+    }
+
+    console.log(chalk.gray('  No model configured. Type /provider to set up, or /exit to quit.'));
+    rl.prompt();
+  });
+
+  rl.on('close', () => process.exit(0));
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
   config = loadConfig();
 
+  // Initialize plugins early so they can handle setup (e.g. /provider wizard)
+  pluginLoader = new PluginLoader(process.cwd()).loadAll();
+  await pluginLoader.runInit({ config, cwd: process.cwd() });
+  skillManager = new SkillManager(process.cwd());
+
   // Check model is configured
   if (!config.model.name) {
-    console.error('\n  ✗ No model configured.');
-    console.error('  Set SMALLCODE_MODEL in .env, or add [model] name = "..." to smallcode.toml');
-    console.error('  See .env.example for setup instructions.\n');
-    process.exit(1);
+    // Allow /provider commands even without a model configured
+    const providerArg = positional.find(a => a === '/provider' || a === '/provider/status' || a === 'provider');
+    if (providerArg) {
+      const cmd = providerArg.startsWith('/') ? providerArg : '/provider';
+      const rest = positional.filter(a => a !== providerArg).join(' ');
+      const createCommandHandler = require('./commands');
+      const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, null, null);
+      const mockRl = { prompt: () => {}, close: () => {}, on: () => {}, question: (q, cb) => cb('') };
+      await handleCmd(rest ? `${cmd} ${rest}` : cmd, mockRl);
+      return;
+    }
+    console.log('\n  ⚡ SmallCode — no model configured.\n');
+    console.log('  Type /provider to configure a model, or /provider status to check.\n');
+    startMinimalTUI();
+    return;
   }
 
   // Initialize escalation engine
@@ -2948,6 +3002,18 @@ async function main() {
     const { ACPAdapter } = require('../src/adapters/acp');
     const adapter = new ACPAdapter(runAgentLoop, config);
     adapter.start();
+    return;
+  }
+
+  // Handle /provider even when model IS configured (must come before positional prompt)
+  const providerArg = positional.find(a => a === '/provider' || a === '/provider/status' || a === 'provider');
+  if (providerArg) {
+    const cmd = providerArg.startsWith('/') ? providerArg : '/provider';
+    const rest = positional.filter(a => a !== providerArg).join(' ');
+    const createCommandHandler = require('./commands');
+    const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, null, null);
+    const mockRl = { prompt: () => {}, close: () => {}, on: () => {}, question: (q, cb) => cb('') };
+    await handleCmd(rest ? `${cmd} ${rest}` : cmd, mockRl);
     return;
   }
 

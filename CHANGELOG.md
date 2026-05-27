@@ -1,5 +1,54 @@
 # Changelog
 
+## [1.3.0] - 2026-05-26
+
+### feat: plugin system core + provider wizard (#28, #29)
+
+Two community contributions from @TheArchitectit, ported and merged on
+top of 1.2.4. Minor version bump because the plugin manifest is a new
+public surface.
+
+- **Plugin system core (PR #28)** — `ProviderRegistry` for
+  plugin-contributed LLM providers, lifecycle hooks (`pre_request`,
+  `post_request`, `on_error`, `session_start`, `session_end`), plugin
+  manifest with `permissions` / `mcpServers` / `providers` fields,
+  prompt-inject provider that wraps any `IModelProvider`, and an
+  example Anthropic provider plugin under
+  `.smallcode/plugins/anthropic-provider/` that demonstrates the
+  full architecture (adapter, pre/post-request, on-error, init,
+  cleanup).
+
+- **Provider wizard (PR #29)** — interactive `/provider` slash
+  command and `configure_provider` / `provider_status` tools for
+  programmatic provider configuration. Supports LM Studio, Ollama,
+  OpenRouter, OpenAI, Anthropic, DeepSeek, and custom endpoints.
+  Steps through provider → base URL → API key → model → escalation
+  fallback. Probes `/v1/models` to validate the API key before
+  writing config. Saves to `~/.config/smallcode/.env` (global),
+  `./.env` (project), or both. The `/plugin install` and
+  `/plugin remove` commands now accept a `--scope project|user|global`
+  flag.
+
+- **Auth-header conflict resolution.** PR #29 was authored before the
+  1.2.1 provider-aware auth fix; the merge preserves the 1.2.1
+  behaviour so OpenAI keys aren't sent to DeepSeek endpoints when
+  both are configured. The wizard's API-key validation uses
+  `Authorization: Bearer` and tolerates 400 responses for providers
+  (Anthropic) that prefer `x-api-key`.
+
+### Verification
+
+- 124/124 unit tests pass (`npm test`) — 9 new in
+  `test/provider_wizard.test.js` pinning `parseEnvFile`,
+  `mergeEnvFile`, `formatStatus`, and the `PROVIDERS` registry.
+- Offline E2E (`npm run test:e2e:offline`) green.
+
+### Credits
+
+- @TheArchitectit — PR #28, PR #29
+
+---
+
 ## [1.2.4] - 2026-05-26
 
 ### feat: read-guard + quality-monitor (itsy port) + skills auto-detect / CRLF (closes #52, #53)
