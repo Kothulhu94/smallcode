@@ -3,7 +3,7 @@
 // One concrete provider instance per declared `model`. Resolved by id.
 
 import type { IModelProvider } from "./types";
-import { OpenAICompatProvider } from "./openai_compat";
+import OpenAICompatProvider from "./openai_compat";
 import { providerRegistry } from "./registry";
 
 // Substitute ${ENV_VAR} placeholders in declared values with runtime env vars.
