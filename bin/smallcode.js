@@ -984,19 +984,47 @@ async function runAgentLoop(userMessage, config) {
       }
     } catch {}
 
-    // Truncate excessive thinking content before it enters conversation history.
-    // Reasoning models can ignore the soft budget and emit 50KB of thinking
-    // loops. We hard-cap it here so the next turn doesn't include a wall of
-    // <think>...</think>. Pure replacement — content stays a string.
+    // Extract and optionally display thinking content before it enters history.
+    // Reasoning models (Qwen3, DeepSeek R1, Gemma 4) emit <think>...</think>
+    // blocks before their answer. We:
+    //   1. Extract the thinking so it can be shown in the TUI (dimmed/collapsed)
+    //   2. Hard-cap it so 50KB of "let me reconsider" loops don't bloat history
+    //   3. Store only the answer in conversation history (thinking is ephemeral)
+    //
+    // Enable display with SMALLCODE_SHOW_THINKING=true (default: false).
+    // The thinking is always stripped from history regardless of this flag.
     if (message.content && typeof message.content === 'string') {
       try {
-        const { truncateThinking, estimateThinkingTokens } = require('../src/model/thinking_budget');
+        const { extractThinking, truncateThinking, estimateThinkingTokens } = require('../src/model/thinking_budget');
+        const { thinking, answer } = extractThinking(message.content);
         const beforeTokens = estimateThinkingTokens(message.content);
-        message.content = truncateThinking(message.content);
+
+        if (thinking) {
+          const showThinking = process.env.SMALLCODE_SHOW_THINKING === 'true';
+          if (showThinking) {
+            const thinkingTokens = estimateThinkingTokens(`<think>${thinking}</think>`);
+            if (_fullscreenRef) {
+              _fullscreenRef.addTool('thinking', 'ok', `${thinkingTokens}t`);
+              const preview = thinking.length > 300 ? thinking.slice(0, 300) + '…' : thinking;
+              _fullscreenRef.addChat('system', `\x1b[2m[thinking]\n${preview}\x1b[0m`);
+            } else {
+              const thinkingLines = thinking.split('\n').map(l => `  \x1b[2m${l}\x1b[0m`).join('\n');
+              process.stdout.write(`\n\x1b[2m[thinking — ${thinkingTokens}t]\x1b[0m\n${thinkingLines}\n\n`);
+            }
+          } else if (beforeTokens > 100 && _fullscreenRef) {
+            _fullscreenRef.addTool('thinking', 'ok', `${beforeTokens}t (set SMALLCODE_SHOW_THINKING=true to view)`);
+          }
+          // Replace message content with just the answer for history storage
+          message.content = answer;
+        }
+
+        // Emergency hard-cap for unclosed/malformed thinking tags
         const afterTokens = estimateThinkingTokens(message.content);
-        if (beforeTokens > 1000 && _fullscreenRef) {
-          _fullscreenRef.addTool('thinking', afterTokens < beforeTokens ? 'err' : 'ok',
-            `${beforeTokens}t${afterTokens < beforeTokens ? ` → ${afterTokens}t (truncated)` : ''}`);
+        if (afterTokens > 500) {
+          message.content = truncateThinking(message.content);
+          if (_fullscreenRef) {
+            _fullscreenRef.addTool('thinking', 'err', `truncated ${afterTokens}t → ${estimateThinkingTokens(message.content)}t`);
+          }
         }
       } catch {}
     }

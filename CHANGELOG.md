@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.2.2] - 2026-05-26
+
+### feat: per-tier endpoint routing + SMALLCODE_SHOW_THINKING — closes #48 #50 #51
+
+- **PR #51 — per-tier endpoint routing** (by @UnloopedMido) — each model tier
+  can now point at a different endpoint. `SMALLCODE_BASE_URL_STRONG`,
+  `SMALLCODE_BASE_URL_MEDIUM`, and `SMALLCODE_BASE_URL_FAST` pair with the
+  existing `SMALLCODE_MODEL_*` vars. `smallcode.toml` supports
+  `[models.fast]`, `[models.default]`, `[models.medium]`, `[models.strong]`
+  sections each with their own `name` and `baseUrl`. Auth follows the
+  selected endpoint. Env vars override TOML. 90/90 tests.
+- **Issue #48 — Can't see Gemma 4 reasoning in TUI** — set
+  `SMALLCODE_SHOW_THINKING=true` to display `<think>` blocks dimmed in the
+  TUI before the final answer. Thinking is always stripped from history
+  (prevents context bloat). Classic mode prints to stdout.
+- **Issue #50 — Local Model + OpenRouter** — resolved by PR #51.
+- **Issue #49 — vLLM + Qwen3.6 Hermes parser** — vLLM config issue; closed
+  with correct flags (`--reasoning-parser qwen3 --tool-call-parser qwen3_coder`).
+
+### Verification
+
+- 90/90 unit tests pass (`npm test`)
+
+---
+
 ## Unreleased
 
 ### feat: per-tier endpoint routing
