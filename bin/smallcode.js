@@ -66,6 +66,8 @@ try {
 const { ToolScorer, checkAndEnforceHardFail, classifyTask, classifyTaskAsync } = require('./governor');
 const { EscalationEngine } = require('./escalation');
 const { EarlyStopDetector } = require('../src/governor/early_stop');
+const { QualityMonitor } = require('../src/governor/quality_monitor');
+const { applyReadGuard } = require('../src/session/read_guard');
 const { TokenMonitor } = require('./token_monitor');
 const { TraceRecorder } = require('./trace_recorder');
 const { EvalRunner } = require('./eval_runner');
@@ -108,6 +110,7 @@ try {
 // Initialize governor (tool scoring + verification)
 const toolScorer = new ToolScorer();
 const earlyStop = new EarlyStopDetector();
+const qualityMonitor = new QualityMonitor();
 const tokenMonitor = new TokenMonitor();
 const traceRecorder = new TraceRecorder(process.cwd());
 let currentToolCategory = null; // Set per-turn by compiled tool router
@@ -504,6 +507,8 @@ function estimateHistoryTokens(history) {
 async function runAgentLoop(userMessage, config) {
   // Reset early-stop state for new turn
   earlyStop.newTurn();
+  // Reset quality monitor's consecutive-correction window for the new turn.
+  qualityMonitor.reset();
 
   // Reset per-turn idempotent-write dedup. PURE_TOOLS dedup uses a sliding
   // window across turns; this set is *per-turn* and stops `memory_remember`
@@ -1029,6 +1034,29 @@ async function runAgentLoop(userMessage, config) {
       } catch {}
     }
 
+    // ── QUALITY MONITOR (itsy port) ──────────────────────────────────────
+    // Catches structural failure modes the model emitted on this turn:
+    // empty turns, blank tool names, hallucinated tool names, and exact
+    // cross-turn repeats. On a hit we inject a targeted steer and continue;
+    // on the third consecutive correction we back off so other guards
+    // (early_stop / escalation) can take over. Disable with
+    // SMALLCODE_QUALITY_MONITOR=false.
+    try {
+      if (String(process.env.SMALLCODE_QUALITY_MONITOR || 'true').toLowerCase() !== 'false') {
+        const knownTools = getAllTools(config, currentToolCategory)
+          .map(t => t && t.function && t.function.name)
+          .filter(Boolean);
+        const signal = qualityMonitor.inspect({ message, knownTools });
+        if (signal) {
+          if (_fullscreenRef) _fullscreenRef.addTool('quality', 'warn', signal.kind);
+          else console.log(`  \x1b[33m⚠ quality-monitor: ${signal.kind}\x1b[0m`);
+          conversationHistory.push({ role: 'assistant', content: message.content || '' });
+          conversationHistory.push({ role: 'user', content: signal.injection });
+          continue;
+        }
+      }
+    } catch {}
+
     // If model wants to call tools
     if (message.tool_calls && message.tool_calls.length > 0) {
       // After first tool call, widen tool set for subsequent iterations.
@@ -1214,18 +1242,36 @@ async function runAgentLoop(userMessage, config) {
           console.log(tui.toolSuccess('', toolMs));
         }
 
-        // Add tool result to history (cap to prevent context explosion)
         // Add tool result to history (cap to prevent context explosion).
-        // 8k chars (~2k tokens) fits ~240 lines, so most source files come
-        // back in a single read_file. Lower caps force multi-read sequences,
-        // each costing a full LLM turn. Mid-turn eviction is the safety net
-        // if total context still grows too large.
+        // The read-guard returns either the original content (under cap),
+        // a head/tail trim with an explicit "re-read a smaller range" hint,
+        // or — when context is already pressured — a head-only trim that
+        // tells the model to grep first instead of re-reading. See
+        // src/session/read_guard.js for the rationale.
         // Override with SMALLCODE_MAX_TOOL_RESULT_CHARS env var.
         const toolContent = result.result || result.error || '';
         const maxToolResultChars = parseInt(process.env.SMALLCODE_MAX_TOOL_RESULT_CHARS) || 8000;
-        const cappedContent = toolContent.length > maxToolResultChars
-          ? toolContent.slice(0, maxToolResultChars - 200) + '\n\n...(truncated, ' + toolContent.length + ' chars total)...\n' + toolContent.slice(-200)
-          : toolContent;
+        const headLines = parseInt(process.env.SMALLCODE_READ_GUARD_HEAD_LINES) || 30;
+        const guardOff = String(process.env.SMALLCODE_READ_GUARD || 'true').toLowerCase() === 'false';
+        let cappedContent;
+        if (guardOff) {
+          cappedContent = toolContent.length > maxToolResultChars
+            ? toolContent.slice(0, maxToolResultChars - 200) + '\n\n...(truncated, ' + toolContent.length + ' chars total)...\n' + toolContent.slice(-200)
+            : toolContent;
+        } else {
+          const guard = applyReadGuard({
+            toolName,
+            content: toolContent,
+            history: conversationHistory,
+            config,
+            fixedCap: maxToolResultChars,
+            headLines,
+          });
+          cappedContent = guard.content;
+          if (guard.trimmed && _fullscreenRef) {
+            _fullscreenRef.addTool('read_guard', 'warn', `${guard.reason}: ${toolContent.length}→${cappedContent.length} chars`);
+          }
+        }
         conversationHistory.push({
           role: 'tool',
           tool_call_id: tc.id,

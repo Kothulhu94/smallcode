@@ -1,6 +1,6 @@
 {
   "name": "smallcode",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "AI coding agent optimized for small LLMs (8B-35B parameters)",
   "main": "src/api/index.js",
   "bin": {
@@ -20,7 +20,8 @@
     "bench:list": "node bench/harness.js --list",
     "bench:diff": "node bench/diff.js",
     "test": "node --test test/*.test.js",
-    "test:e2e": "node test/e2e_smoke.js"
+    "test:e2e": "node test/e2e_smoke.js",
+    "test:e2e:offline": "node test/e2e_offline.js"
   },
   "dependencies": {
     "bonescript-compiler": "0.14.0",

@@ -1,0 +1,52 @@
+// SmallCode — Quality Monitor MarrowScript Declaration
+//
+// Per-turn structural failure detector. Catches empty turns, blank tool
+// names, hallucinated tools, and exact-repeat tool calls; emits a steer
+// correction back into the conversation history. Hand-port lives at
+// src/governor/quality_monitor.js until the marrow compiler emits Node
+// output for this file.
+//
+// Audited from itsy's analysis of little-coder's `quality-monitor`
+// extension. See:
+//   docs/little-coder-analysis.md (in itsy upstream)
+//   AGENTS.md — backend tasks declared in MarrowScript
+
+system QualityMonitor {
+  domain: cognitive_scaffold
+
+  entity Signal {
+    owns: [
+      // empty_response | empty_tool_name | hallucinated_tool | repeat_call
+      kind: string,
+      injection: string,
+      signature: string
+    ]
+  }
+
+  entity MonitorState {
+    owns: [
+      consecutive_corrections: int,
+      last_call_signature: string
+    ]
+  }
+
+  parameters {
+    max_corrections: int = 2
+  }
+
+  contract inspect(message: any, known_tools: array<string>, aborted: bool)
+    -> Signal? {
+    requires: known_tools != null
+    ensures: result == null OR result.kind in [
+      "empty_response",
+      "empty_tool_name",
+      "hallucinated_tool",
+      "repeat_call"
+    ]
+  }
+
+  contract reset() {
+    ensures: state.consecutive_corrections == 0
+    ensures: state.last_call_signature == ""
+  }
+}

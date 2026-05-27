@@ -1,0 +1,48 @@
+// SmallCode — Read Guard MarrowScript Declaration
+//
+// Replaces the dumb fixed-byte cap on tool results with a context-aware
+// trim. When live context usage is already past the budget OR the file
+// alone exceeds 50% of the window, returns just the head N lines plus
+// an explicit "use grep / read a range" directive instead of a silent
+// middle-of-file truncation. Otherwise falls back to a head/tail trim
+// that preserves redirect intent.
+//
+// Hand-port lives at src/session/read_guard.js until the marrow
+// compiler emits Node output. Audited from itsy's analysis of
+// little-coder's `read-guard` extension.
+
+system ReadGuard {
+  domain: cognitive_scaffold
+
+  entity TrimResult {
+    owns: [
+      trimmed: bool,
+      // null | "context-pressure" | "fixed-cap-with-hint" | "fixed-cap"
+      reason: string,
+      content: string
+    ]
+  }
+
+  parameters {
+    head_lines_default: int = 30
+    pressure_pct_default: int = 70
+    file_share_threshold_pct: int = 50
+  }
+
+  contract apply_read_guard(
+    tool_name: string,
+    content: string,
+    history: array<any>,
+    config: any,
+    fixed_cap: int,
+    head_lines: int
+  ) -> TrimResult {
+    requires: content != null
+    ensures: result.content != null
+    ensures: result.trimmed == false IMPLIES result.content == content
+  }
+
+  contract estimate_history_tokens(history: array<any>) -> int {
+    ensures: result >= 0
+  }
+}

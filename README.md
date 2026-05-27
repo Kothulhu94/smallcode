@@ -208,6 +208,19 @@ Drop short reference notes into a `knowledge/` directory and the most relevant o
 ### Bundled Skills
 Six dev-methodology skills ship in `skills/` (brainstorming, debugging, tdd, iterative-retrieval, learn, external-guard). They load automatically alongside project skills in `.smallcode/skills/`. Use `/skill list` and `/skill use <name>`. See `skills/README.md`. Adapted from [Willow 2.0 Fylgja](https://github.com/rudi193-cmd/willow-2.0/tree/master/willow/fylgja/skills).
 
+SmallCode also auto-detects skills in two nested layouts already used by other agents in the ecosystem:
+
+- `.agents/skills/<name>/SKILL.md` — itsy / jukefr layout (closes #53)
+- `.claude/skills/<name>/SKILL.md` — Claude Code layout (closes #53)
+
+Skills loaded from these layouts are accepted without YAML frontmatter; the directory name becomes the skill name. Skill files with CRLF line endings now load correctly on Windows (closes #52).
+
+### Quality Monitor (itsy port)
+Catches four structural failure modes per turn — empty turns, blank tool names, hallucinated tool names (returns closest matches as suggestions), and exact-repeat tool calls across turns. On a hit it injects a `[QUALITY-MONITOR]` steer back into the conversation; capped at 2 consecutive corrections to prevent spirals. Disable with `SMALLCODE_QUALITY_MONITOR=false`.
+
+### Context-Aware Read Guard (itsy port)
+Replaces the dumb fixed-byte tool-result cap. When live context usage is past the budget OR the file alone exceeds 50% of the model's window, returns the first 30 lines of the file (imports + signatures) plus an explicit "use grep / read a smaller line range" directive instead of a silent middle-of-file truncation. Falls back to head/tail trim with a clearer redirect hint for read-shaped tools. Disable with `SMALLCODE_READ_GUARD=false`. Tune head size with `SMALLCODE_READ_GUARD_HEAD_LINES=30`.
+
 ### Read-Before-Write Guard
 Tracks which paths the model has read this session. First `write_file` to an existing unread file is refused with a hint to `read_file` first; second attempt allowed (so legitimate full-replace intents succeed). New files always permitted. `patch` counts as a read. Disable with `SMALLCODE_WRITE_GUARD=false`.
 
