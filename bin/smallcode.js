@@ -45,7 +45,14 @@ const readline = require('readline');
 const os = require('os');
 const tui = require('./tui');
 const chalk = tui.chalk;
-const { loadConfig: loadConfigModule, checkEndpoint, buildAuthHeaders } = require('./config');
+const {
+  loadConfig: loadConfigModule,
+  checkEndpoint,
+  buildAuthHeaders,
+  getModelTarget,
+  getModelTargetForModel,
+  withModelTarget,
+} = require('./config');
 const { TOOLS, COMPOUND_TOOLS, getAllTools: _getAllToolsModule } = require('./tools');
 const { runValidation: _runValidationModule } = require('./model_client');
 const { mcpCall, initCodeGraph, killMCP, getMcpProcess } = require('./mcp_bridge');
@@ -83,7 +90,7 @@ const { resolveReferences, formatReferencesForPrompt } = require('../src/session
 const { TokenTracker } = require('../src/session/tokens');
 const { UndoStack } = require('../src/session/undo');
 const { shouldInjectGitContext, getGitDiffContext } = require('../src/session/git_context');
-const { routeModel } = require('../src/model/router');
+const { routeTier } = require('../src/model/router');
 
 // Initialize structured memory (budget-aware-mcp's SQLite + FTS5 store, falls back to JSON)
 let memoryStore;
@@ -754,9 +761,9 @@ async function runAgentLoop(userMessage, config) {
 
   // Multi-model routing: pick model based on task complexity (if configured)
   // Phase C: Marrowscript-compiled coding_router for tier-based dispatch.
-  // Falls back to hand-rolled routeModel() if compiled router unavailable.
+  // Falls back to hand-rolled routeTier() if compiled router unavailable.
   if (config.models || process.env.SMALLCODE_USE_TIER_ROUTING === 'true') {
-    let selectedModel = null;
+    let selectedTarget = null;
     let selectedTier = null;
     try {
       const { routeToTier, estimateComplexity, isCompiledCognitionAvailable } = require('./cognition_adapter');
@@ -764,12 +771,11 @@ async function runAgentLoop(userMessage, config) {
         const complexity = estimateComplexity(userMessage);
         const route = routeToTier(complexity);
         if (route) {
-          // Map model_id back to actual model name from config.models if set,
-          // otherwise use the SMALLCODE_MODEL env var (already configured per tier).
+          // Map tier back to a model target when config.models is set.
           if (config.models) {
-            if (route.tier === 'trivial') selectedModel = config.models.fast;
-            else if (route.tier === 'simple') selectedModel = config.models.default;
-            else selectedModel = config.models.strong;
+            if (route.tier === 'trivial') selectedTarget = getModelTarget(config, 'fast');
+            else if (route.tier === 'simple') selectedTarget = getModelTarget(config, 'default');
+            else selectedTarget = getModelTarget(config, 'strong');
           }
           selectedTier = route.tier;
         }
@@ -777,13 +783,17 @@ async function runAgentLoop(userMessage, config) {
     } catch {}
 
     // Fallback: hand-rolled routeModel
-    if (!selectedModel && config.models) {
-      selectedModel = routeModel(userMessage, config);
+    if (!selectedTarget && config.models) {
+      const tier = routeTier(userMessage);
+      selectedTarget = getModelTarget(config, tier);
+      selectedTier = tier;
     }
 
-    if (selectedModel && selectedModel !== config.model.name) {
-      config.model.name = selectedModel;
-      if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `→ ${selectedModel}${selectedTier ? ' (' + selectedTier + ')' : ''}`);
+    if (selectedTarget && selectedTarget.model) {
+      config.activeModelTarget = selectedTarget;
+      if (_fullscreenRef && selectedTarget.model !== config.model.name) {
+        _fullscreenRef.addTool('router', 'ok', `→ ${selectedTarget.model}${selectedTier ? ' (' + selectedTier + ')' : ''}`);
+      }
     }
   }
 
@@ -1989,7 +1999,9 @@ function getPluginPrompts() {
 
 // Make a chat completion request (non-streaming for tool use, streaming for final response)
 async function chatCompletion(config, messages) {
-  const baseUrl = config.model.baseUrl;
+  let target = config.activeModelTarget || getModelTarget(config, 'default');
+  let requestConfig = withModelTarget(config, target);
+  let baseUrl = target.baseUrl;
   const systemMsg = {
     role: 'system',
     content: buildCompactSystemPrompt(currentTaskType, messages),
@@ -2051,7 +2063,7 @@ async function chatCompletion(config, messages) {
       // Only extract images from the most recent user message
       if (idx !== lastUserIdx) return msg;
       const images = extractImages(msg.content, process.cwd());
-      if (images.length === 0 || !modelSupportsVision(config.model.name)) return msg;
+      if (images.length === 0 || !modelSupportsVision(target.model)) return msg;
       return {
         ...msg,
         content: [
@@ -2063,7 +2075,7 @@ async function chatCompletion(config, messages) {
 
     const _tools = getAllTools(config, currentToolCategory);
     const body = {
-      model: config.model.name,
+      model: target.model,
       messages: [systemMsg, ...processedWithImages],
       temperature: 0.1,
       max_tokens: parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS) || 8192,
@@ -2086,10 +2098,19 @@ async function chatCompletion(config, messages) {
     try {
       const { getAdaptiveRouter } = require('../src/model/adaptive_router');
       const router = getAdaptiveRouter();
-      const selected = router.selectModel(config);
+      const selected = router.selectModel(requestConfig);
       if (selected.model && selected.model !== body.model) {
         if (_fullscreenRef) _fullscreenRef.addTool('adaptive', 'ok', `→ ${selected.model} (high failure rate)`);
-        body.model = selected.model;
+        target = {
+          ...getModelTargetForModel(config, selected.model, selected.tier || target.tier),
+          tier: selected.tier || target.tier,
+          model: selected.model,
+          name: selected.model,
+          baseUrl: selected.url || target.baseUrl,
+        };
+        requestConfig = withModelTarget(config, target);
+        baseUrl = target.baseUrl;
+        body.model = target.model;
       }
     } catch {}
 
@@ -2134,12 +2155,7 @@ async function chatCompletion(config, messages) {
     } catch {}
 
     // Build headers — use provider-aware key routing from config.js
-    const headers = buildAuthHeaders(config);
-    // OpenRouter requires HTTP-Referer and X-Title headers
-    if (baseUrl.includes('openrouter.ai')) {
-      headers['HTTP-Referer'] = 'https://github.com/Doorman11991/smallcode';
-      headers['X-Title'] = 'SmallCode';
-    }
+    const headers = buildAuthHeaders(requestConfig);
 
     // Timeout: abort if model doesn't respond within configured limit.
     // Default 300s (5 min) — enough for slow hardware (RK3588, CPU inference).
@@ -2247,7 +2263,7 @@ async function chatCompletion(config, messages) {
 
     // Track token usage
     if (tokenTracker && data?.usage) {
-      tokenTracker.record(data, config.model.name);
+      tokenTracker.record(data, body.model || config.model.name);
     }
     if (data?.usage) {
       tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
@@ -2281,14 +2297,16 @@ async function chatCompletion(config, messages) {
 
 // Stream a final text response (no tools, just text output)
 async function streamFinalResponse(config, messages) {
-  const baseUrl = config.model.baseUrl;
+  const target = config.activeModelTarget || getModelTarget(config, 'default');
+  const requestConfig = withModelTarget(config, target);
+  const baseUrl = target.baseUrl;
   const systemMsg = {
     role: 'system',
     content: `You are SmallCode, a coding assistant. Summarize what you just did in 1-2 sentences. Be concise.`
   };
 
   try {
-    const headers = buildAuthHeaders(config);
+    const headers = buildAuthHeaders(requestConfig);
 
     // Fix #3: Only include messages that form valid pairs. Strip tool_call
     // assistant messages that don't have a following tool result (which causes
@@ -2321,7 +2339,7 @@ async function streamFinalResponse(config, messages) {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        model: config.model.name,
+        model: target.model,
         messages: [systemMsg, ...safeMessages.slice(-6)],
         stream: true,
         temperature: 0.1,
@@ -2389,7 +2407,9 @@ async function streamFinalResponse(config, messages) {
 
 // Streaming version for when no tools are needed (direct responses)
 async function sendToModel(message, config) {
-  const baseUrl = config.model.baseUrl || process.env.OLLAMA_HOST || 'http://localhost:11434';
+  const target = config.activeModelTarget || getModelTarget(config, 'default');
+  const requestConfig = withModelTarget(config, target);
+  const baseUrl = target.baseUrl || process.env.OLLAMA_HOST || 'http://localhost:11434';
   const systemPrompt = `You are SmallCode, a coding assistant. You help users by reading, editing, and creating code files.
 Rules:
 - Read files before editing them.
@@ -2398,15 +2418,15 @@ Rules:
 - If a task is complex, break it into steps.`;
 
   // OpenAI-compatible (LM Studio, vLLM, etc.)
-  if (config.model.provider === 'openai' || baseUrl.includes('/v1')) {
+  if (target.provider === 'openai' || baseUrl.includes('/v1')) {
     try {
-      const headers = buildAuthHeaders(config);
+      const headers = buildAuthHeaders(requestConfig);
 
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          model: config.model.name,
+          model: target.model,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: message },
@@ -2457,12 +2477,12 @@ Rules:
 
   // Ollama native endpoint
   try {
-    const host = process.env.OLLAMA_HOST || 'http://localhost:11434';
+    const host = baseUrl.replace(/\/v1$/, '') || process.env.OLLAMA_HOST || 'http://localhost:11434';
     const response = await fetch(`${host}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: config.model.name,
+        model: target.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: message },

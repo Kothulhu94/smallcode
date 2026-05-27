@@ -42,40 +42,29 @@ function loadConfig(flags = {}) {
     },
   };
 
-  // Multi-model routing (optional)
-  if (env.SMALLCODE_MODEL_FAST || env.SMALLCODE_MODEL_STRONG) {
-    config.models = {
-      fast: env.SMALLCODE_MODEL_FAST || config.model.name,
-      default: env.SMALLCODE_MODEL_DEFAULT || config.model.name,
-      strong: env.SMALLCODE_MODEL_STRONG || config.model.name,
-    };
-  }
-
-  // Legacy: still check smallcode.toml / config.toml for backwards compatibility
+  // smallcode.toml / config.toml for backwards compatibility and tier routing.
   const tomlPaths = [
     path.join(process.cwd(), 'smallcode.toml'),
     path.join(process.cwd(), '.smallcode', 'config.toml'),
     path.join(os.homedir(), '.config', 'smallcode', 'config.toml'),
   ];
   for (const tomlPath of tomlPaths) {
-    if (fs.existsSync(tomlPath) && !config.model.name) {
+    if (fs.existsSync(tomlPath)) {
       try {
-        const content = fs.readFileSync(tomlPath, 'utf-8');
-        const lines = content.split('\n');
-        for (const line of lines) {
-          const m = line.match(/^name\s*=\s*"?([^"#]+)"?/);
-          if (m) config.model.name = m[1].trim();
-          const b = line.match(/^(?:baseUrl|base_url)\s*=\s*"?([^"#]+)"?/);
-          if (b) config.model.baseUrl = b[1].trim();
-          const p = line.match(/^provider\s*=\s*"?([^"#]+)"?/);
-          if (p) config.model.provider = p[1].trim();
-          const to = line.match(/^timeout\s*=\s*(\d+)/);
-          if (to) config.model.timeout = parseInt(to[1]);
-        }
+        const toml = parseTomlConfig(fs.readFileSync(tomlPath, 'utf-8'));
+        // Primary [model] from TOML only when env did not set SMALLCODE_MODEL.
+        if (!config.model.name) applyTomlPrimaryConfig(config, toml);
+        // Tier sections are always merged — env tier vars override below.
+        applyTomlModelTiers(config, toml);
         break;
       } catch {}
     }
   }
+
+  applyEnvModelTier(config, 'fast', 'SMALLCODE_MODEL_FAST', 'SMALLCODE_BASE_URL_FAST');
+  applyEnvModelTier(config, 'default', 'SMALLCODE_MODEL_DEFAULT', 'SMALLCODE_BASE_URL_DEFAULT');
+  applyEnvModelTier(config, 'medium', 'SMALLCODE_MODEL_MEDIUM', 'SMALLCODE_BASE_URL_MEDIUM');
+  applyEnvModelTier(config, 'strong', 'SMALLCODE_MODEL_STRONG', 'SMALLCODE_BASE_URL_STRONG');
 
   // CLI flags override everything
   if (flags.model) config.model.name = flags.model;
@@ -90,8 +79,157 @@ function loadConfig(flags = {}) {
   // SMALLCODE_BASE_URL=http://localhost:11434 used to fail because the
   // OpenAI-compat path tried .../models instead of .../v1/models.
   config.model.baseUrl = normalizeBaseUrl(config.model.baseUrl);
+  normalizeModelTiers(config);
 
   return config;
+}
+
+function stripInlineComment(value) {
+  let quote = null;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if ((ch === '"' || ch === "'") && value[i - 1] !== '\\') {
+      quote = quote === ch ? null : (quote || ch);
+    }
+    if (ch === '#' && !quote) return value.slice(0, i).trim();
+  }
+  return value.trim();
+}
+
+function parseTomlValue(raw) {
+  const value = stripInlineComment(raw);
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (/^-?\d+$/.test(value)) return parseInt(value, 10);
+  return value;
+}
+
+function parseTomlConfig(content) {
+  const out = {};
+  let section = [];
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      section = sectionMatch[1].split('.').map(s => s.trim()).filter(Boolean);
+      continue;
+    }
+    const kv = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!kv) continue;
+    let cursor = out;
+    for (const part of section) {
+      if (!cursor[part] || typeof cursor[part] !== 'object') cursor[part] = {};
+      cursor = cursor[part];
+    }
+    cursor[kv[1]] = parseTomlValue(kv[2]);
+  }
+  return out;
+}
+
+function coerceModelEntry(value) {
+  if (!value) return {};
+  if (typeof value === 'string') return { name: value };
+  return {
+    name: value.name || value.model || '',
+    baseUrl: value.baseUrl || value.base_url || '',
+    provider: value.provider || '',
+  };
+}
+
+function ensureModels(config) {
+  if (!config.models) config.models = {};
+  return config.models;
+}
+
+function mergeModelTier(config, tier, value) {
+  const entry = coerceModelEntry(value);
+  if (!entry.name && !entry.baseUrl && !entry.provider) return;
+  const models = ensureModels(config);
+  const prev = coerceModelEntry(models[tier]);
+  models[tier] = {
+    ...prev,
+    ...(entry.name ? { name: entry.name } : {}),
+    ...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}),
+    ...(entry.provider ? { provider: entry.provider } : {}),
+  };
+}
+
+function applyTomlPrimaryConfig(config, toml) {
+  if (toml.provider) config.model.provider = toml.provider;
+  if (toml.name) config.model.name = toml.name;
+  if (toml.baseUrl || toml.base_url) config.model.baseUrl = toml.baseUrl || toml.base_url;
+  if (toml.timeout) config.model.timeout = parseInt(toml.timeout, 10) || config.model.timeout;
+  if (toml.model) {
+    if (toml.model.provider) config.model.provider = toml.model.provider;
+    if (toml.model.name) config.model.name = toml.model.name;
+    if (toml.model.baseUrl || toml.model.base_url) config.model.baseUrl = toml.model.baseUrl || toml.model.base_url;
+    if (toml.model.timeout) config.model.timeout = parseInt(toml.model.timeout, 10) || config.model.timeout;
+  }
+}
+
+function applyTomlModelTiers(config, toml) {
+  if (!toml.models) return;
+  for (const tier of ['fast', 'default', 'medium', 'strong']) {
+    if (toml.models[tier]) mergeModelTier(config, tier, toml.models[tier]);
+  }
+}
+
+function applyEnvModelTier(config, tier, modelEnv, urlEnv) {
+  const entry = {};
+  if (process.env[modelEnv]) entry.name = process.env[modelEnv];
+  if (process.env[urlEnv]) entry.baseUrl = process.env[urlEnv];
+  mergeModelTier(config, tier, entry);
+}
+
+function normalizeModelTiers(config) {
+  if (!config.models) return;
+  for (const tier of Object.keys(config.models)) {
+    const entry = coerceModelEntry(config.models[tier]);
+    config.models[tier] = {
+      name: entry.name || config.model.name,
+      baseUrl: normalizeBaseUrl(entry.baseUrl || config.model.baseUrl),
+      provider: entry.provider || config.model.provider,
+    };
+  }
+}
+
+function getModelTarget(config, tier = 'default') {
+  const entry = config?.models?.[tier] ? coerceModelEntry(config.models[tier]) : {};
+  return {
+    tier,
+    model: entry.name || config?.model?.name || '',
+    name: entry.name || config?.model?.name || '',
+    baseUrl: normalizeBaseUrl(entry.baseUrl || config?.model?.baseUrl || ''),
+    provider: entry.provider || config?.model?.provider || 'openai',
+  };
+}
+
+function getModelTargetForModel(config, modelName, preferredTier = 'default') {
+  if (config?.models) {
+    for (const tier of ['fast', 'default', 'medium', 'strong']) {
+      const entry = coerceModelEntry(config.models[tier]);
+      if (entry.name && entry.name === modelName) return getModelTarget(config, tier);
+    }
+  }
+  const fallback = getModelTarget(config, preferredTier);
+  return { ...fallback, model: modelName || fallback.model, name: modelName || fallback.name };
+}
+
+function withModelTarget(config, target) {
+  return {
+    ...config,
+    model: {
+      ...config.model,
+      name: target.model || target.name || config.model.name,
+      baseUrl: target.baseUrl || config.model.baseUrl,
+      provider: target.provider || config.model.provider,
+    },
+    activeModelTarget: target,
+  };
 }
 
 /**
@@ -141,11 +279,7 @@ async function checkEndpoint(config) {
   // OpenAI-compatible endpoint (LM Studio, vLLM, OpenRouter, etc.)
   if (config.model.provider === 'openai' || baseUrl.includes('/v1')) {
     try {
-      const headers = {};
-      const apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
-      if (apiKey) {
-        headers['Authorization'] = `Bearer ${apiKey}`;
-      }
+      const headers = buildAuthHeaders(config);
       const response = await fetch(`${baseUrl}/models`, { headers });
       if (!response.ok) {
         console.log(`  ⚠ Cannot reach endpoint at ${baseUrl}`);
@@ -209,25 +343,26 @@ async function checkEndpoint(config) {
  */
 function buildAuthHeaders(config) {
   const headers = { 'Content-Type': 'application/json' };
-  const baseUrl = (config.model.baseUrl || '').toLowerCase();
+  const modelConfig = config.model || config;
+  const baseUrl = (modelConfig.baseUrl || '').toLowerCase();
 
   // Route key selection based on the target endpoint URL.
   let apiKey = null;
   if (baseUrl.includes('api.deepseek.com')) {
-    apiKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || config.model.apiKey;
+    apiKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || modelConfig.apiKey;
   } else if (baseUrl.includes('api.openai.com')) {
-    apiKey = process.env.OPENAI_API_KEY || config.model.apiKey;
+    apiKey = process.env.OPENAI_API_KEY || modelConfig.apiKey;
   } else if (baseUrl.includes('openrouter.ai')) {
-    apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || config.model.apiKey;
+    apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || modelConfig.apiKey;
   } else if (baseUrl.includes('anthropic.com')) {
     // Anthropic uses x-api-key, not Bearer — but if someone routes through
     // an OpenAI-compat proxy, Bearer still works. We use ANTHROPIC_API_KEY
     // first, then fall back to the generic key.
-    apiKey = process.env.ANTHROPIC_API_KEY || config.model.apiKey;
+    apiKey = process.env.ANTHROPIC_API_KEY || modelConfig.apiKey;
   } else {
     // Local server or unknown cloud — fall back to any available key.
     // SMALLCODE_API_KEY is the explicit "my endpoint needs this key" option.
-    apiKey = process.env.SMALLCODE_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
+    apiKey = process.env.SMALLCODE_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || modelConfig.apiKey;
   }
 
   if (apiKey) {
@@ -240,4 +375,13 @@ function buildAuthHeaders(config) {
   return headers;
 }
 
-module.exports = { loadConfig, checkEndpoint, buildAuthHeaders, normalizeBaseUrl };
+module.exports = {
+  loadConfig,
+  checkEndpoint,
+  buildAuthHeaders,
+  normalizeBaseUrl,
+  parseTomlConfig,
+  getModelTarget,
+  getModelTargetForModel,
+  withModelTarget,
+};

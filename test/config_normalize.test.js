@@ -10,8 +10,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
-const { normalizeBaseUrl } = require('../bin/config');
+const { loadConfig, normalizeBaseUrl } = require('../bin/config');
 
 test('Ollama bare host gets /v1 appended', () => {
   assert.equal(normalizeBaseUrl('http://localhost:11434'), 'http://localhost:11434/v1');
@@ -62,4 +65,92 @@ test('Empty / falsy input is returned unchanged', () => {
 
 test('Malformed URL is returned unchanged (no throw)', () => {
   assert.equal(normalizeBaseUrl('not-a-url'), 'not-a-url');
+});
+
+function withTempConfig(toml, fn) {
+  const prevCwd = process.cwd();
+  const prevEnv = { ...process.env };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'smallcode-config-'));
+  fs.writeFileSync(path.join(dir, 'smallcode.toml'), toml);
+  process.chdir(dir);
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith('SMALLCODE_') || key === 'OLLAMA_HOST') delete process.env[key];
+  }
+  try {
+    return fn();
+  } finally {
+    process.chdir(prevCwd);
+    process.env = prevEnv;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('smallcode.toml loads per-tier model targets', () => {
+  withTempConfig(`
+[model]
+name = "local-default"
+baseUrl = "http://localhost:11434"
+
+[models.strong]
+name = "openrouter/large"
+baseUrl = "https://openrouter.ai/api/v1"
+`, () => {
+    const config = loadConfig();
+    assert.equal(config.model.name, 'local-default');
+    assert.equal(config.model.baseUrl, 'http://localhost:11434/v1');
+    assert.equal(config.models.strong.name, 'openrouter/large');
+    assert.equal(config.models.strong.baseUrl, 'https://openrouter.ai/api/v1');
+  });
+});
+
+test('environment tier vars override smallcode.toml tier values', () => {
+  withTempConfig(`
+[model]
+name = "local-default"
+baseUrl = "http://localhost:11434/v1"
+
+[models.strong]
+name = "toml-strong"
+baseUrl = "http://localhost:1234/v1"
+`, () => {
+    process.env.SMALLCODE_MODEL_STRONG = 'env-strong';
+    process.env.SMALLCODE_BASE_URL_STRONG = 'https://openrouter.ai/api/v1';
+    const config = loadConfig();
+    assert.equal(config.models.strong.name, 'env-strong');
+    assert.equal(config.models.strong.baseUrl, 'https://openrouter.ai/api/v1');
+  });
+});
+
+test('missing tier URL falls back to primary base URL', () => {
+  withTempConfig(`
+[model]
+name = "local-default"
+baseUrl = "http://localhost:1234"
+
+[models.fast]
+name = "local-fast"
+`, () => {
+    const config = loadConfig();
+    assert.equal(config.models.fast.name, 'local-fast');
+    assert.equal(config.models.fast.baseUrl, 'http://localhost:1234/v1');
+  });
+});
+
+test('env primary model skips TOML [model] but still loads tier sections', () => {
+  withTempConfig(`
+[model]
+name = "toml-default"
+baseUrl = "http://localhost:11434/v1"
+
+[models.strong]
+name = "openrouter/large"
+baseUrl = "https://openrouter.ai/api/v1"
+`, () => {
+    process.env.SMALLCODE_MODEL = 'env-default';
+    const config = loadConfig();
+    assert.equal(config.model.name, 'env-default');
+    assert.equal(config.model.baseUrl, 'http://localhost:1234/v1');
+    assert.equal(config.models.strong.name, 'openrouter/large');
+    assert.equal(config.models.strong.baseUrl, 'https://openrouter.ai/api/v1');
+  });
 });

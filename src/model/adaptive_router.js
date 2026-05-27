@@ -78,16 +78,24 @@ class AdaptiveModelRouter {
     const rate = entry.fails / entry.calls;
 
     if (rate > 0.6) {
-      const strong = process.env.SMALLCODE_MODEL_STRONG;
+      const strong = config?.models?.strong?.name || process.env.SMALLCODE_MODEL_STRONG;
       if (strong && strong !== primaryModel) {
-        return { model: strong, url: primaryUrl };
+        return {
+          model: strong,
+          url: config?.models?.strong?.baseUrl || process.env.SMALLCODE_BASE_URL_STRONG || primaryUrl,
+          tier: 'strong',
+        };
       }
     }
 
     if (rate > 0.3) {
-      const medium = process.env.SMALLCODE_MODEL_MEDIUM;
+      const medium = config?.models?.medium?.name || process.env.SMALLCODE_MODEL_MEDIUM;
       if (medium && medium !== primaryModel) {
-        return { model: medium, url: primaryUrl };
+        return {
+          model: medium,
+          url: config?.models?.medium?.baseUrl || process.env.SMALLCODE_BASE_URL_MEDIUM || primaryUrl,
+          tier: 'medium',
+        };
       }
     }
 

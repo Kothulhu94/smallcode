@@ -76,10 +76,39 @@ SMALLCODE_BASE_URL=http://localhost:1234/v1
 # Optional: escalation (auto-fallback to cloud on hard fail)
 # ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
+# OPENROUTER_API_KEY=sk-or-v1-...
 # DEEPSEEK_API_KEY=sk-...
 ```
 
 See `.env.example` for all options. Also supports `smallcode.toml` for backwards compatibility.
+
+SmallCode can route each model tier to a different endpoint. This lets you keep
+fast/default work local while sending complex tasks to a larger OpenRouter model:
+
+```bash
+SMALLCODE_MODEL=qwen3:8b
+SMALLCODE_BASE_URL=http://localhost:11434/v1
+
+SMALLCODE_MODEL_STRONG=openai/gpt-4o-mini
+SMALLCODE_BASE_URL_STRONG=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+Equivalent `smallcode.toml`:
+
+```toml
+[model]
+provider = "openai"
+name = "qwen3:8b"
+baseUrl = "http://localhost:11434/v1"
+
+[models.strong]
+name = "openai/gpt-4o-mini"
+baseUrl = "https://openrouter.ai/api/v1"
+```
+
+Tier URLs are optional. If `SMALLCODE_BASE_URL_STRONG` or
+`[models.strong].baseUrl` is omitted, that tier uses the primary base URL.
 
 ## Architecture
 
@@ -227,12 +256,13 @@ When 3 or more files are edited in a single agent turn, `coordinateMultiFileEdit
 When `patch` fails because `old_str` no longer exists in the file, `semanticMerge()` asks the model to merge the intended change into the current file content. Returns the complete corrected file. Replaces the hard error with a recovery attempt. TTL 1 min (content-specific).
 
 ### Adaptive Model Select (Rank 8)
-`AdaptiveModelRouter` in `src/model/adaptive_router.js` tracks per-model call/fail counts. When the primary model's failure rate exceeds 0.3 (medium) or 0.6 (strong), `chatCompletion` automatically overrides `body.model` with `SMALLCODE_MODEL_MEDIUM` or `SMALLCODE_MODEL_STRONG`. Requires at least 3 calls before routing decisions activate. Reset via `router.reset()`.
+`AdaptiveModelRouter` in `src/model/adaptive_router.js` tracks per-model call/fail counts. When the primary model's failure rate exceeds 0.3 (medium) or 0.6 (strong), `chatCompletion` automatically routes to `SMALLCODE_MODEL_MEDIUM` or `SMALLCODE_MODEL_STRONG` and their matching `SMALLCODE_BASE_URL_*` endpoint when configured. Requires at least 3 calls before routing decisions activate. Reset via `router.reset()`.
 
 ```bash
 # Optional: configure fallback models for adaptive routing
 SMALLCODE_MODEL_MEDIUM=qwen2.5-coder:32b
 SMALLCODE_MODEL_STRONG=gpt-4o
+SMALLCODE_BASE_URL_STRONG=https://openrouter.ai/api/v1
 ```
 
 ### Benchmark Harness
