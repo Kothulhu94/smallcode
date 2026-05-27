@@ -2281,6 +2281,67 @@ async function chatCompletion(config, messages) {
       }
     };
 
+    // Plugin hook: pre_request (before plugin provider check so it fires for all providers)
+    if (pluginLoader) {
+      await pluginLoader.runHooks('pre_request', {
+        provider: config.model.provider,
+        model: body.model || config.model.name,
+        messages: processedMessages,
+      });
+    }
+
+    // Plugin-registered providers: call directly, bypass fetch
+    const { providerRegistry } = require('../src/compiled/providers/registry');
+    const pluginProvider = providerRegistry.get(config.model.provider);
+    if (pluginProvider) {
+      _stopSpinner();
+      try {
+        const chatResp = await pluginProvider.chat({
+          model: body.model,
+          messages: body.messages,
+          temperature: body.temperature,
+          maxOutput: body.max_tokens,
+          tools: body.tools,
+        }, controller.signal);
+        clearTimeout(timeout);
+
+        // Translate ChatResponse → OpenAI-compatible format for downstream consumers
+        const data = {
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: chatResp.content,
+              tool_calls: chatResp.tool_calls || [],
+            },
+            finish_reason: chatResp.tool_calls?.length ? 'tool_calls' : 'stop',
+          }],
+          usage: chatResp.usage ? {
+            prompt_tokens: chatResp.usage.promptTokens,
+            completion_tokens: chatResp.usage.completionTokens,
+            total_tokens: chatResp.usage.totalTokens,
+          } : undefined,
+        };
+
+        if (tokenTracker && data.usage) {
+          tokenTracker.record(data, config.model.name);
+        }
+        if (data.usage) {
+          tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
+          traceRecorder.recordTokens(data.usage.prompt_tokens, data.usage.completion_tokens);
+          if (chargeBudget) {
+            try { chargeBudget('run_turn', { tokens: (data.usage.prompt_tokens || 0) + (data.usage.completion_tokens || 0) }); } catch {}
+          }
+        }
+        return data;
+      } catch (pluginErr) {
+        clearTimeout(timeout);
+        const msg = pluginErr.message || 'Plugin provider failed';
+        console.log(`  \x1b[31m✗ Plugin provider "${config.model.provider}": ${msg}\x1b[0m`);
+        if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `${config.model.provider}: ${msg.slice(0, 80)}`);
+        return null;
+      }
+    }
+
     let response;
     try {
       response = await fetch(`${baseUrl}/chat/completions`, {
@@ -2307,6 +2368,14 @@ async function chatCompletion(config, messages) {
                      '';
         console.log(`  \x1b[31m✗ Endpoint error: ${errMsg}${hint}\x1b[0m`);
         if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `${errMsg.slice(0, 80)}${hint}`);
+      }
+      // Plugin hook: on_error
+      if (pluginLoader) {
+        await pluginLoader.runHooks('on_error', {
+          provider: config.model.provider,
+          model: body.model || config.model.name,
+          error: fetchErr,
+        }).catch(() => {});
       }
       return null;
     }
@@ -2338,6 +2407,16 @@ async function chatCompletion(config, messages) {
     }
 
     const data = await response.json();
+
+    // Plugin hook: post_request
+    if (pluginLoader) {
+      await pluginLoader.runHooks('post_request', {
+        provider: config.model.provider,
+        model: body.model || config.model.name,
+        response: data,
+        usage: data?.usage || null,
+      }).catch(() => {});
+    }
 
     // Track token usage
     if (tokenTracker && data?.usage) {
@@ -2800,6 +2879,13 @@ async function main() {
 
   // Initialize plugins and skills
   pluginLoader = new PluginLoader(process.cwd()).loadAll();
+  await pluginLoader.runInit({ config, cwd: process.cwd() });
+
+  // Run plugin shutdown handlers on exit
+  process.on('beforeExit', () => {
+    if (pluginLoader) pluginLoader.runShutdown({ config, cwd: process.cwd() }).catch(() => {});
+  });
+
   skillManager = new SkillManager(process.cwd());
 
   // Initialize MCP client (connect to external MCP servers)

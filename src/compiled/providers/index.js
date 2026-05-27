@@ -6,7 +6,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MODELS = void 0;
 exports.getModel = getModel;
 exports.listModelNames = listModelNames;
+exports.resolveProvider = resolveProvider;
 const openai_compat_1 = require("./openai_compat");
+const registry_1 = require("./registry");
 // Substitute ${ENV_VAR} placeholders in declared values with runtime env vars.
 function _sub(s) {
     return s.replace(/\$\{(\w+)\}/g, (_, k) => process.env[k] || '');
@@ -85,4 +87,22 @@ function listModelNames() {
     if (!_models)
         _models = _buildModels();
     return Object.keys(_models).sort();
+}
+/**
+ * Resolve a provider by name. Checks the plugin registry first;
+ * falls back to creating a default OpenAICompatProvider with the
+ * configured baseUrl.
+ *
+ * IMPORTANT: Do NOT register the fallback into providerRegistry here.
+ * resolveProvider() is a lookup, not a mutation. Registering the fallback
+ * would pollute the registry with an unintended entry under whatever name
+ * was passed in, causing later resolveProvider() calls to short-circuit
+ * to the plugin path and bypass the real OpenAI-compat fetch.
+ */
+function resolveProvider(name) {
+    const fromRegistry = registry_1.providerRegistry.get(name);
+    if (fromRegistry)
+        return fromRegistry;
+    const baseUrl = _sub("${SMALLCODE_BASE_URL}") || "http://localhost:1234/v1";
+    return new openai_compat_1.OpenAICompatProvider(baseUrl);
 }

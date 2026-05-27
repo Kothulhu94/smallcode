@@ -19,12 +19,18 @@
 //   "tools": [{ "name": "...", "description": "...", "parameters": {...}, "handler": "./handler.js" }],
 //   "prompts": [{ "inject": "always|backend|coding", "content": "..." }],
 //   "commands": [{ "name": "/mycmd", "description": "...", "handler": "./cmd.js" }],
-//   "hooks": [{ "event": "post_tool", "filter": ["write_file"], "handler": "./hook.js" }]
+//   "hooks": [{ "event": "pre_request|post_request|on_error|session_start|session_end|post_tool", "filter": ["write_file"], "handler": "./hook.js" }],
+//   "init": "./init.js",
+//   "shutdown": "./cleanup.js",
+//   "providers": [{ "name": "...", "module": "./adapter.js", "options": {}, "capabilities": { "tools": true, "streaming": true } }],
+//   "permissions": { "read": true, "write": true, "execute": false, "network": true },
+//   "mcpServers": { "my-server": { "command": "./server.js", "args": [], "transport": "stdio" } }
 // }
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { providerRegistry } = require('../compiled/providers/registry');
 
 class PluginLoader {
   constructor(projectDir) {
@@ -34,6 +40,10 @@ class PluginLoader {
     this.commands = {};     // /command → handler
     this.prompts = [];      // System prompt injections
     this.hooks = [];        // Event hooks
+    this.providers = {};    // name → IModelProvider instance
+    this.initHandlers = [];   // async init handlers from plugin manifests
+    this.shutdownHandlers = []; // async shutdown handlers from plugin manifests
+    this.errors = [];       // { dir, message } for diagnostics
   }
 
   // Load all plugins from project + user dirs
@@ -87,6 +97,8 @@ class PluginLoader {
               description: toolDef.description || '',
               parameters: toolDef.parameters || { type: 'object', properties: {} },
             },
+            // Underscore-prefixed fields are consumed by executor.js when it
+            // dispatches plugin tool calls. The model never sees these.
             _handler: handler,
             _plugin: plugin.name,
           });
@@ -122,7 +134,13 @@ class PluginLoader {
 
       // Register hooks
       if (manifest.hooks) {
+        const validEvents = ['pre_tool', 'post_tool', 'session_start', 'session_end',
+                             'pre_request', 'post_request', 'on_error'];
         for (const h of manifest.hooks) {
+          if (!validEvents.includes(h.event)) {
+            console.warn(`[plugin:${plugin.name}] Unknown hook event "${h.event}", skipping`);
+            continue;
+          }
           const handlerPath = path.resolve(pluginDir, h.handler || './hook.js');
           let handler = null;
           if (fs.existsSync(handlerPath)) {
@@ -137,9 +155,64 @@ class PluginLoader {
         }
       }
 
+      // Register init handler
+      if (manifest.init) {
+        const initPath = path.resolve(pluginDir, manifest.init);
+        if (fs.existsSync(initPath)) {
+          try {
+            const initHandler = require(initPath);
+            this.initHandlers.push({
+              handler: initHandler.default || initHandler,
+              plugin: plugin.name,
+            });
+          } catch (e) {
+            console.error(`[plugin:${plugin.name}] Failed to load init: ${e.message}`);
+          }
+        }
+      }
+
+      // Register shutdown handler
+      if (manifest.shutdown) {
+        const shutdownPath = path.resolve(pluginDir, manifest.shutdown);
+        if (fs.existsSync(shutdownPath)) {
+          try {
+            const shutdownHandler = require(shutdownPath);
+            this.shutdownHandlers.push({
+              handler: shutdownHandler.default || shutdownHandler,
+              plugin: plugin.name,
+            });
+          } catch (e) {
+            console.error(`[plugin:${plugin.name}] Failed to load shutdown: ${e.message}`);
+          }
+        }
+      }
+
+      // Register providers
+      if (manifest.providers) {
+        for (const spec of manifest.providers) {
+          try {
+            const modulePath = path.resolve(pluginDir, spec.module);
+            const Export = require(modulePath);
+            const ProviderClass = Export.default || Export;
+            const instance = new ProviderClass(spec.options || {});
+            if (!instance.chat || !instance.name) {
+              throw new Error(`Provider "${spec.name}" must implement .chat() and .name`);
+            }
+            const caps = spec.capabilities || {};
+            providerRegistry.register(spec.name, instance, caps);
+            this.providers[spec.name] = instance;
+          } catch (e) {
+            const msg = `Failed to load provider "${spec.name}": ${e.message}`;
+            console.error(`[plugin:${plugin.name}] ${msg}`);
+            this.errors.push({ dir: pluginDir, message: msg });
+          }
+        }
+      }
+
       this.plugins.push(plugin);
     } catch (e) {
-      // Silently skip broken plugins
+      // Store error for diagnostics, but don't crash
+      this.errors.push({ dir: pluginDir, message: e.message });
     }
   }
 
@@ -203,6 +276,13 @@ class PluginLoader {
     return null;
   }
 
+  // Get error diagnostics for failed plugin loads
+  // TODO: re-add getPermissions(), hasPermission(), getMCPServers() when
+  // permissions enforcement is wired into the tool execution pipeline.
+  getErrors() {
+    return this.errors;
+  }
+
   // List all plugins for display
   list() {
     return this.plugins.map(p => ({
@@ -212,6 +292,53 @@ class PluginLoader {
       tools: this.tools.filter(t => t._plugin === p.name).map(t => t.function.name),
       commands: Object.keys(this.commands).filter(k => this.commands[k].plugin === p.name),
     }));
+  }
+
+  // Run all plugin init handlers. Called once at startup after loadAll().
+  async runInit(context = {}) {
+    for (const { handler, plugin } of this.initHandlers) {
+      try {
+        await handler(context);
+      } catch (e) {
+        console.error(`[plugin:${plugin}] init failed: ${e.message}`);
+      }
+    }
+  }
+
+  // Run all plugin shutdown handlers. Called on exit for cleanup.
+  async runShutdown(context = {}) {
+    for (const { handler, plugin } of this.shutdownHandlers) {
+      try {
+        await handler(context);
+      } catch (e) {
+        console.error(`[plugin:${plugin}] shutdown failed: ${e.message}`);
+      }
+    }
+  }
+
+  // Execute hooks for a given event. Returns array of results from non-void handlers.
+  async runHooks(event, data = {}) {
+    const results = [];
+    for (const hook of this.hooks) {
+      if (hook.event !== event) continue;
+      if (hook.filter.length > 0 && !hook.filter.includes(data.toolName || '')) continue;
+      if (!hook.handler) continue;
+
+      // For post_tool hooks, handler is { after(toolResult, ctx) }
+      // For new event hooks, handler is { handle(data) } or a plain function
+      try {
+        if (hook.handler.handle) {
+          const result = await hook.handler.handle(data);
+          if (result !== undefined) results.push(result);
+        } else if (typeof hook.handler === 'function') {
+          const result = await hook.handler(data);
+          if (result !== undefined) results.push(result);
+        }
+      } catch (e) {
+        console.error(`[plugin:${hook.plugin}] hook ${event} failed: ${e.message}`);
+      }
+    }
+    return results;
   }
 }
 

@@ -43,6 +43,15 @@ const COMPOUND_TOOLS = [
   { type: 'function', function: { name: 'run', description: 'Run an existing file (python, node, etc). Use this instead of create_and_run when the file already exists.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Command to run e.g. "python game.py" or "node server.js"' }, timeout: { type: 'integer', description: 'Timeout in seconds. Default: 30' } }, required: ['command'] } } },
 ];
 
+// ─── Provider Tools ──────────────────────────────────────────────────────────
+// Provider tools (like configure_provider) are only sent to the model when
+// SMALLCODE_PROVIDER is not configured. When a provider is already set, the
+// model doesn't need to know about provider configuration at all.
+
+const PROVIDER_TOOLS = [
+  { type: 'function', function: { name: 'configure_provider', description: 'Configure a new AI provider (LM Studio, OpenRouter, Anthropic, OpenAI, DeepSeek, Ollama, or custom endpoint). Saves config to ~/.smallcode/.env and sets it as active.', parameters: { type: 'object', properties: { provider: { type: 'string', description: 'Provider name: lmstudio, openrouter, anthropic, openai, deepseek, ollama, or custom' } }, required: ['provider'] } } },
+];
+
 // ─── Tool Routing ────────────────────────────────────────────────────────────
 
 /**
@@ -100,4 +109,4 @@ function getAllTools(config, stage2Category, deps = {}) {
   return allTools;
 }
 
-module.exports = { TOOLS, COMPOUND_TOOLS, getAllTools };
+module.exports = { TOOLS, COMPOUND_TOOLS, PROVIDER_TOOLS, getAllTools };
