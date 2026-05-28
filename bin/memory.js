@@ -169,8 +169,41 @@ class MemoryStore {
     return obj;
   }
 
-  // Load relevant memory for a task (keyword-based retrieval)
-  loadForTask(taskDescription) {
+  // Load relevant memory for a task.
+  //
+  // Slice 2C: tries SQLite recall() first (FTS5 + ranked recall + recency
+  // decay + use-count update). If SQLite is unavailable or returns no results,
+  // falls back to the legacy JSON keyword loop so nothing breaks.
+  //
+  // Return shape is always a plain MemoryObject[] — callers are unchanged.
+  loadForTask(taskDescription, maxTokens) {
+    // ── SQLite path (preferred) ───────────────────────────────────────────────
+    if (this.sqliteStore && this.sqliteStore.db) {
+      try {
+        const limit = typeof maxTokens === 'number' ? Math.ceil(maxTokens / 50) : 5;
+        const rows = this.sqliteStore.recall(taskDescription, { limit });
+        if (rows && rows.length > 0) {
+          // Map SQLite rows → MemoryObject-compatible plain objects so callers
+          // can use o.type, o.title, o.content, o.id uniformly.
+          return rows.map(row => ({
+            id:      row.id,
+            type:    row.category,       // SQLite uses 'category'; callers expect 'type'
+            title:   row.text.split('\n')[0].slice(0, 80),  // first line as title
+            content: row.text,
+            tags:    row.keywords ? row.keywords.split(',').map(t => t.trim()) : [],
+            source:  row.source || null,
+            createdAt: new Date(row.created_at).toISOString(),
+            updatedAt: new Date(row.last_used).toISOString(),
+            relations: [],
+          }));
+        }
+        // SQLite returned nothing — fall through to legacy path
+      } catch (e) {
+        // SQLite recall failure is non-fatal; fall through to legacy
+      }
+    }
+
+    // ── Legacy JSON path (fallback) ───────────────────────────────────────────
     if (this.objects.size === 0) return [];
 
     const words = taskDescription.toLowerCase().split(/\s+/);
