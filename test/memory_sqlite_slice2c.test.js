@@ -1,10 +1,9 @@
-'use strict';
-
-// Slice 2C — loadForTask() runtime read path upgrade
+// Slice 2C (updated) — loadForTask() token-budget trimming
 //
 // Verifies that loadForTask() prefers the SQLite recall() path when SQLite is
-// available and has results, and falls back to the legacy JSON keyword loop
-// when SQLite is unavailable or returns nothing.
+// available and has results, falls back to the legacy JSON keyword loop
+// when SQLite is unavailable or returns nothing, and trims results to the
+// real token budget (ceil(chars/4)) rather than a limit guess.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -179,34 +178,43 @@ test('Slice 2C - SQLite recall() crash falls back gracefully', () => {
   cleanupDir(rootDir);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Slice 2C — maxTokens param is forwarded to SQLite limit
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────────
+// Slice 2C — real token-budget trimming (not a limit guess)
+// ─────────────────────────────────────────────────────────────────────────────────
 
-test('Slice 2C - maxTokens converts to a SQLite recall limit', () => {
+test('Slice 2C - maxTokens trims results by real token cost, not by count', () => {
   const rootDir = makeTempDir();
   const store = new MemoryStore(rootDir);
   store.init();
 
-  // Write 4 memories
+  // Use a fixed, predictable content string. loadForTask maps SQLite rows as:
+  //   title   = row.text.split('\n')[0].slice(0, 80)   <- first 80 chars of text
+  //   content = row.text                                <- full text
+  //   type    = row.category
+  // The token estimator renders: `[type] title: content\n`
+  const CONTENT = 'x'.repeat(60) + ' testing recall';  // 76 chars, no newline
+  const DERIVED_TITLE = CONTENT.slice(0, 80);           // same as full content (< 80)
+
+  // Pre-compute the exact rendered token cost loadForTask will produce.
+  const sampleRendered = `[context] ${DERIVED_TITLE}: ${CONTENT}\n`;
+  const costPerItem = Math.ceil(sampleRendered.length / 4);
+
+  // Write 4 identical-cost memories (keywords differ so all match the query).
   for (let i = 1; i <= 4; i++) {
-    store.remember('context', `Note ${i}`, `Content about testing and recall item ${i}.`, {
-      tags: ['testing'],
-    });
+    store.remember('context', `Note ${i}`, CONTENT, { tags: ['testing'] });
   }
 
-  let capturedOpts;
-  const orig = store.sqliteStore.recall.bind(store.sqliteStore);
-  store.sqliteStore.recall = (q, opts) => {
-    capturedOpts = opts;
-    return orig(q, opts);
-  };
+  // Budget that fits exactly 2 items — the third must be cut.
+  const budget = costPerItem * 2;
 
-  // maxTokens=100 → limit = ceil(100/50) = 2
-  store.loadForTask('testing recall', 100);
-  assert.ok(capturedOpts, 'recall must receive opts');
-  assert.equal(capturedOpts.limit, 2, 'limit should be ceil(maxTokens/50)');
+  const results = store.loadForTask('testing recall', budget);
+
+  assert.equal(
+    results.length, 2,
+    `Expected exactly 2 items in budget ${budget} (cost per item: ${costPerItem})`
+  );
 
   store.sqliteStore.close();
   cleanupDir(rootDir);
 });
+

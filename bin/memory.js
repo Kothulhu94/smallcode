@@ -171,31 +171,54 @@ class MemoryStore {
 
   // Load relevant memory for a task.
   //
-  // Slice 2C: tries SQLite recall() first (FTS5 + ranked recall + recency
-  // decay + use-count update). If SQLite is unavailable or returns no results,
-  // falls back to the legacy JSON keyword loop so nothing breaks.
+  // Slice 2C (updated): recall candidates from SQLite (FTS5 + ranked),
+  // then trim to maxTokens using real per-item token estimation.
+  // Token estimate: ceil(chars/4) on the rendered form — same as formatForContext().
+  // Candidate pool: always fetch CANDIDATE_POOL rows so the token trim
+  // decides the cut rather than a rough ceil(maxTokens/50) guess.
+  // Falls back to the legacy JSON keyword loop when SQLite is unavailable,
+  // empty, or throws.
   //
   // Return shape is always a plain MemoryObject[] — callers are unchanged.
   loadForTask(taskDescription, maxTokens) {
+    const budget = typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : 800;
+
+    // Token estimator: mirrors the render format used by callers and formatForContext.
+    function estimateItemTokens(item) {
+      const rendered = `[${item.type}] ${item.title}: ${item.content}\n`;
+      return Math.ceil(rendered.length / 4);
+    }
+
     // ── SQLite path (preferred) ───────────────────────────────────────────────
     if (this.sqliteStore && this.sqliteStore.db) {
       try {
-        const limit = typeof maxTokens === 'number' ? Math.ceil(maxTokens / 50) : 5;
-        const rows = this.sqliteStore.recall(taskDescription, { limit });
+        // Fetch a generous candidate pool — let the token trim decide the cut.
+        const CANDIDATE_POOL = 20;
+        const rows = this.sqliteStore.recall(taskDescription, { limit: CANDIDATE_POOL });
         if (rows && rows.length > 0) {
-          // Map SQLite rows → MemoryObject-compatible plain objects so callers
-          // can use o.type, o.title, o.content, o.id uniformly.
-          return rows.map(row => ({
-            id:      row.id,
-            type:    row.category,       // SQLite uses 'category'; callers expect 'type'
-            title:   row.text.split('\n')[0].slice(0, 80),  // first line as title
-            content: row.text,
-            tags:    row.keywords ? row.keywords.split(',').map(t => t.trim()) : [],
-            source:  row.source || null,
+          // Map SQLite rows → MemoryObject-compatible plain objects.
+          const candidates = rows.map(row => ({
+            id:        row.id,
+            type:      row.category,   // SQLite 'category' -> callers expect 'type'
+            title:     row.text.split('\n')[0].slice(0, 80),
+            content:   row.text,
+            tags:      row.keywords ? row.keywords.split(',').map(t => t.trim()) : [],
+            source:    row.source || null,
             createdAt: new Date(row.created_at).toISOString(),
             updatedAt: new Date(row.last_used).toISOString(),
             relations: [],
           }));
+
+          // Walk ranked candidates, accumulate token cost, stop when over budget.
+          const result = [];
+          let spent = 0;
+          for (const item of candidates) {
+            const cost = estimateItemTokens(item);
+            if (spent + cost > budget) break;
+            result.push(item);
+            spent += cost;
+          }
+          return result;
         }
         // SQLite returned nothing — fall through to legacy path
       } catch (e) {
@@ -223,9 +246,17 @@ class MemoryStore {
       if (score > 0) scored.push({ obj, score });
     }
 
-    // Sort by relevance, return top matches
+    // Sort by relevance, trim to token budget.
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, 5).map(s => s.obj);
+    const result = [];
+    let spent = 0;
+    for (const { obj } of scored) {
+      const cost = estimateItemTokens(obj);
+      if (spent + cost > budget) break;
+      result.push(obj);
+      spent += cost;
+    }
+    return result;
   }
 
   // Get all objects of a type
