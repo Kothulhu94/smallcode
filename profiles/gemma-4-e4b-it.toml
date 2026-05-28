@@ -1,0 +1,14 @@
+# SmallCode Model Profile: Gemma 4 E4B IT
+# Optimized on-device model from Google
+
+name = "gemma-4-e4b-it"
+context_length = 128000
+max_output_tokens = 8192
+supports_tool_calling = true
+tool_format = "native"
+supports_json_mode = true
+supports_system_message = true
+template = "gemma"
+strengths = ["speed", "code_completion", "tool_calling", "instruction_following"]
+weaknesses = ["complex_reasoning", "multi_file_coordination"]
+stop_sequences = ["<eos>", "<turn|>", "<|tool_response|>"]

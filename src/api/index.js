@@ -19,6 +19,7 @@ const {
   safeResolvePath,
   sanitizeToolOutput,
 } = require('../security/sanitize');
+const { openJournal, EVENT_TYPES } = require('../session/event_journal');
 
 class SmallCode extends EventEmitter {
   constructor(config = {}) {
@@ -39,6 +40,23 @@ class SmallCode extends EventEmitter {
     this.earlyStop = new EarlyStopDetector();
     this.profile = getProfile(this.config.model, this.config.contextWindow);
     this._history = [];
+
+    this.sessionId = config.sessionId || `api-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    try {
+      this.journal = openJournal(this.sessionId, this.config.cwd);
+    } catch (e) {
+      this.journal = null;
+    }
+  }
+
+  _logEvent(type, payload, tags) {
+    if (this.journal) {
+      try {
+        this.journal.append(type, payload, tags);
+      } catch (e) {
+        // Safe guard to prevent logging failure from affecting execution
+      }
+    }
   }
 
   /**
@@ -49,6 +67,7 @@ class SmallCode extends EventEmitter {
     const startTime = Date.now();
     this.earlyStop.newTurn();
     this._history = [];
+    this._logEvent(EVENT_TYPES.SESSION_START, { prompt, model: this.config.model });
 
     const result = {
       response: '',
@@ -106,10 +125,36 @@ class SmallCode extends EventEmitter {
             this.emit('tool_start', { name: toolName, args: toolArgs });
             const toolStart = Date.now();
 
+            const argsSummary = toolArgs.command
+              ? `command: ${toolArgs.command}`
+              : toolArgs.path
+                ? `path: ${toolArgs.path}`
+                : toolArgs.pattern
+                  ? `pattern: ${toolArgs.pattern}`
+                  : JSON.stringify(toolArgs);
+            this._logEvent(EVENT_TYPES.TOOL_CALL, {
+              tool: toolName,
+              id: tc.id,
+              argsSummary: String(argsSummary || '').slice(0, 500),
+            });
+
             const toolResult = await this._executeTool(toolName, toolArgs);
             const toolMs = Date.now() - toolStart;
 
             this.emit('tool_end', { name: toolName, result: toolResult, ms: toolMs });
+
+            const resultSummary = toolResult.error
+              ? `error: ${toolResult.error}`
+              : toolResult.result
+                ? String(toolResult.result).slice(0, 500)
+                : (toolResult.action ? `${toolResult.action} ${toolResult.path || ''}` : 'success');
+            this._logEvent(EVENT_TYPES.TOOL_RESULT, {
+              tool: toolName,
+              id: tc.id,
+              success: !toolResult.error,
+              durationMs: toolMs,
+              summary: resultSummary,
+            });
 
             // Track file changes
             if (toolResult.action === 'Created') result.filesCreated.push(toolResult.path || toolArgs.path);
@@ -153,10 +198,19 @@ class SmallCode extends EventEmitter {
       result.success = !result.error;
     } catch (err) {
       result.error = err.message;
+      this._logEvent(EVENT_TYPES.ERROR, {
+        phase: 'run',
+        message: err.message,
+        stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+      });
       this.emit('error', err);
     }
 
     result.duration = Date.now() - startTime;
+    this._logEvent(EVENT_TYPES.SESSION_END, {
+      reason: result.error ? 'error' : 'complete',
+      mode: 'api',
+    });
     return result;
   }
 

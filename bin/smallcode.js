@@ -94,6 +94,7 @@ const { TokenTracker } = require('../src/session/tokens');
 const { UndoStack } = require('../src/session/undo');
 const { shouldInjectGitContext, getGitDiffContext } = require('../src/session/git_context');
 const { routeTier } = require('../src/model/router');
+const { openJournal, EVENT_TYPES } = require('../src/session/event_journal');
 
 // Initialize structured memory (budget-aware-mcp's SQLite + FTS5 store, falls back to JSON)
 let memoryStore;
@@ -128,6 +129,17 @@ let skillManager = null;
 // Session persistence + token tracking
 let sessionStore = null;
 let tokenTracker = null;
+let journal = null;
+
+function logEvent(type, payload, tags) {
+  if (journal) {
+    try {
+      journal.append(type, payload, tags);
+    } catch (e) {
+      // Safe guard to prevent logging failure from affecting execution
+    }
+  }
+}
 
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
@@ -285,7 +297,8 @@ async function runTUI(config) {
         if (cmd === '/quit' || cmd === '/q' || cmd === '/exit') {
           if (sessionStore) sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
           screen.leave();
-          killMCP()
+          killMCP();
+          logEvent(EVENT_TYPES.SESSION_END, { reason: 'exit_command', mode: 'interactive' });
           process.exit(0);
         }
         // Capture command output by temporarily redirecting stdout + console.log
@@ -315,7 +328,8 @@ async function runTUI(config) {
         if (sessionStore) {
           sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
         }
-        killMCP()
+        killMCP();
+        logEvent(EVENT_TYPES.SESSION_END, { reason: 'exit_ui', mode: 'interactive' });
         process.exit(0);
       },
     });
@@ -389,9 +403,10 @@ async function runTUI(config) {
   });
 
   rl.on('close', () => {
-    killMCP()
+    killMCP();
     if (_lspClient) { try { _lspClient.stop(); } catch {} }
     console.log(chalk.gray('\n  Goodbye!\n'));
+    logEvent(EVENT_TYPES.SESSION_END, { reason: 'exit_terminal', mode: 'interactive' });
     process.exit(0);
   });
 }
@@ -1188,8 +1203,34 @@ async function runAgentLoop(userMessage, config) {
         process.stdout.write(tui.toolStart(toolName));
         const toolStart2 = Date.now();
 
+        const argsSummary = toolArgs.command
+          ? `command: ${toolArgs.command}`
+          : toolArgs.path
+            ? `path: ${toolArgs.path}`
+            : toolArgs.pattern
+              ? `pattern: ${toolArgs.pattern}`
+              : JSON.stringify(toolArgs);
+        logEvent(EVENT_TYPES.TOOL_CALL, {
+          tool: toolName,
+          id: tc.id,
+          argsSummary: String(argsSummary || '').slice(0, 500),
+        });
+
         const result = await executeTool(toolName, toolArgs);
         const toolMs = Date.now() - toolStart2;
+
+        const resultSummary = result.error
+          ? `error: ${result.error}`
+          : result.result
+            ? String(result.result).slice(0, 500)
+            : (result.action ? `${result.action} ${result.path || ''}` : 'success');
+        logEvent(EVENT_TYPES.TOOL_RESULT, {
+          tool: toolName,
+          id: tc.id,
+          success: !result.error,
+          durationMs: toolMs,
+          summary: resultSummary,
+        });
 
         // Track validation errors so the poisoned-history fix can revert
         // bad assistant turns where the model emitted malformed tool args.
@@ -2449,6 +2490,11 @@ async function chatCompletion(config, messages) {
     return data;
   } catch (err) {
     console.log(`  \x1b[31m✗ ${err.message}\x1b[0m`);
+    logEvent(EVENT_TYPES.ERROR, {
+      phase: 'chatCompletion',
+      message: err.message,
+      stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+    });
     return null;
   }
 }
@@ -2558,7 +2604,12 @@ async function streamFinalResponse(config, messages) {
     if (_fullscreenRef) { _fullscreenRef.endStream(); _fullscreenRef.setStreaming(false); }
     else console.log('');
     return fullContent;
-  } catch {
+  } catch (err) {
+    logEvent(EVENT_TYPES.ERROR, {
+      phase: 'streamFinalResponse',
+      message: err.message,
+      stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+    });
     return null;
   }
 }
@@ -2629,6 +2680,11 @@ Rules:
       console.log('');
     } catch (err) {
       console.log(`  ✗ Error: ${err.message}`);
+      logEvent(EVENT_TYPES.ERROR, {
+        phase: 'sendToModelOpenAI',
+        message: err.message,
+        stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+      });
     }
     return;
   }
@@ -2674,6 +2730,11 @@ Rules:
     }
   } catch (err) {
     console.log(`  ✗ Error: ${err.message}`);
+    logEvent(EVENT_TYPES.ERROR, {
+      phase: 'sendToModelOllama',
+      message: err.message,
+      stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+    });
   }
 }
 
@@ -2726,6 +2787,7 @@ async function runNonInteractive(config, prompt) {
   } catch {}
   killMCP();
   if (_lspClient) { try { _lspClient.stop(); } catch {} }
+  logEvent(EVENT_TYPES.SESSION_END, { reason: 'complete', mode: 'non-interactive' });
   // Force exit after a short tick to let any pending log writes flush.
   setTimeout(() => process.exit(0), 100).unref();
 }
@@ -2973,6 +3035,13 @@ async function main() {
     sessionStore.create(config.model.name);
   }
 
+  try {
+    journal = openJournal(sessionStore.current.id, process.cwd());
+    logEvent(EVENT_TYPES.SESSION_START, { model: config.model.name, mode: flags.nonInteractive ? 'non-interactive' : 'interactive' });
+  } catch (e) {
+    journal = null;
+  }
+
   if (flags.mcp) {
     runMCP();
     return;
@@ -3028,5 +3097,11 @@ async function main() {
 
 main().catch(err => {
   console.error(`Fatal: ${err.message}`);
+  logEvent(EVENT_TYPES.ERROR, {
+    phase: 'main',
+    message: err.message,
+    stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+  });
+  logEvent(EVENT_TYPES.SESSION_END, { reason: 'fatal_error', mode: 'cli' });
   process.exit(1);
 });

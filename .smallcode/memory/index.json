@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "objects": [
+    {
+      "id": "56a97717",
+      "type": {
+        "type": "context",
+        "title": "Hello! Who are you?",
+        "content": "Task: Hello! Who are you?\n\nSuccessful steps:\n- graph_search\n\nDuration: 352.4s",
+        "tags": [
+          "evidence",
+          "success"
+        ],
+        "files": [],
+        "symbols": []
+      },
+      "tags": [],
+      "relations": [],
+      "createdAt": "2026-05-28T08:13:11.808Z",
+      "updatedAt": "2026-05-28T08:13:11.808Z",
+      "source": null
+    }
+  ],
+  "updatedAt": "2026-05-28T08:13:11.812Z"
+}

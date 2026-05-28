@@ -48,6 +48,17 @@ class MemoryStore {
     this.rootDir = rootDir || process.cwd();
     this.memDir = path.join(this.rootDir, MEMORY_DIR);
     this.objects = new Map();
+    this.sqliteStore = null;
+
+    try {
+      const { MemoryStore: SqliteMemoryStore } = require('../src/memory/memory_store');
+      this.sqliteStore = new SqliteMemoryStore({
+        dbPath: path.join(this.memDir, 'memory.db')
+      });
+    } catch (e) {
+      // Gracefully ignore better-sqlite3 load errors
+    }
+
     this.load();
   }
 
@@ -55,6 +66,13 @@ class MemoryStore {
   init() {
     if (!fs.existsSync(this.memDir)) {
       fs.mkdirSync(this.memDir, { recursive: true });
+    }
+    if (this.sqliteStore) {
+      try {
+        this.sqliteStore.init();
+      } catch (e) {
+        // Fall back gracefully
+      }
     }
     this.save();
     return true;
@@ -95,10 +113,55 @@ class MemoryStore {
   }
 
   // Save/remember a new memory object
-  remember(type, title, content, { tags, source, relations } = {}) {
+  remember(typeOrObj, title, content, opts = {}) {
+    let type, tags, source, relations;
+    if (typeOrObj && typeof typeOrObj === 'object') {
+      const o = typeOrObj;
+      type = o.type;
+      title = o.title;
+      content = o.content;
+      tags = o.tags;
+      source = o.source;
+      relations = o.relations;
+    } else {
+      type = typeOrObj;
+      tags = opts.tags;
+      source = opts.source;
+      relations = opts.relations;
+    }
+
     const obj = new MemoryObject({ type, title, content, tags, source, relations });
     this.objects.set(obj.id, obj);
     this.save();
+
+    // Dual-write to SQLite
+    if (this.sqliteStore) {
+      try {
+        let category = type || 'context';
+        const validCategories = new Set(['decision', 'convention', 'gotcha', 'workflow', 'context']);
+        if (!validCategories.has(category)) {
+          category = 'context';
+        }
+
+        let keywords = tags || [];
+        let sourceStr = '';
+        if (source && typeof source === 'object') {
+          sourceStr = JSON.stringify(source);
+        } else if (source) {
+          sourceStr = String(source);
+        }
+
+        this.sqliteStore.saveMemory({
+          category,
+          text: content || '',
+          keywords,
+          source: sourceStr
+        });
+      } catch (e) {
+        // Silent fail
+      }
+    }
+
     return obj;
   }
 
