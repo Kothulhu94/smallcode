@@ -49,6 +49,12 @@ class MemoryStore {
     this.memDir = path.join(this.rootDir, MEMORY_DIR);
     this.objects = new Map();
     this.load();
+    try {
+      const { MemoryStore: SqliteStore } = require('../src/memory/memory_store.js');
+      this.sqliteStore = new SqliteStore(this.rootDir);
+    } catch (e) {
+      this.sqliteStore = null;
+    }
   }
 
   // Initialize memory directory
@@ -95,10 +101,17 @@ class MemoryStore {
   }
 
   // Save/remember a new memory object
-  remember(type, title, content, { tags, source, relations } = {}) {
-    const obj = new MemoryObject({ type, title, content, tags, source, relations });
+  remember(type, title, content, { tags, source, relations, id } = {}) {
+    const obj = new MemoryObject({ id, type, title, content, tags, source, relations });
     this.objects.set(obj.id, obj);
     this.save();
+    if (this.sqliteStore) {
+      try {
+        this.sqliteStore.saveMemory(obj.toJSON());
+      } catch (e) {
+        // Dual-write failure is contained
+      }
+    }
     return obj;
   }
 
@@ -148,6 +161,13 @@ class MemoryStore {
     const obj = this.objects.get(id);
     if (!obj) return false;
     this.objects.delete(id);
+    if (this.sqliteStore) {
+      try {
+        this.sqliteStore.forget(id);
+      } catch (e) {
+        // Dual-delete failure is contained
+      }
+    }
     // Remove markdown file
     const filename = `${obj.type}-${obj.id}.md`;
     const filePath = path.join(this.memDir, filename);
