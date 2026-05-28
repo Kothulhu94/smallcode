@@ -203,6 +203,28 @@ class MemoryStore {
   }
 
   /**
+   * Delete a memory by ID — alias used by the dual-delete bridge in bin/memory.js.
+   *
+   * @param {string} id
+   * @returns {boolean} true if a record was deleted
+   */
+  forget(id) {
+    if (!this.db) return false;
+
+    const info = this.db.prepare('DELETE FROM memories WHERE id = ?').run(id);
+
+    if (this.useFts && info.changes > 0) {
+      try {
+        this.db.prepare('DELETE FROM memories_fts WHERE memory_id = ?').run(id);
+      } catch (e) {
+        // Fallback
+      }
+    }
+
+    return info.changes > 0;
+  }
+
+  /**
    * Scan and delete expired memory items.
    *
    * @returns {number} Count of removed memories
@@ -302,7 +324,7 @@ class MemoryStore {
       try {
         // FTS MATCH query joining keywords with OR
         const matchQuery = keywords.join(' OR ');
-        
+
         let querySql = `
           SELECT m.*, fts.rowid as fts_rowid FROM memories m
           JOIN memories_fts fts ON m.id = fts.memory_id
@@ -330,7 +352,7 @@ class MemoryStore {
 
     // 2. Score and Rank candidates
     for (const cand of candidates) {
-      // Relevance: count number of keyword keyword occurrences in text or keywords field
+      // Relevance: count number of keyword occurrences in text or keywords field
       let matches = 0;
       const textLower = cand.text.toLowerCase();
       const kwLower = (cand.keywords || '').toLowerCase();
@@ -361,7 +383,7 @@ class MemoryStore {
     const updateStmt = this.db.prepare('UPDATE memories SET last_used = ?, use_count = use_count + 1 WHERE id = ?');
     for (const item of results) {
       updateStmt.run(now, item.id);
-      
+
       // Update local values in returned array as well
       item.use_count += 1;
       item.last_used = now;
@@ -375,7 +397,7 @@ class MemoryStore {
   _likeRecallSearch(keywords, now, options) {
     // Generate: (text LIKE ? OR keywords LIKE ?) OR ...
     const likeClauses = keywords.map(() => '(text LIKE ? OR keywords LIKE ?)').join(' OR ');
-    
+
     let querySql = `
       SELECT * FROM memories
       WHERE (${likeClauses}) AND (expires_at IS NULL OR expires_at >= ?)

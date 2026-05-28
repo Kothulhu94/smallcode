@@ -113,8 +113,10 @@ class MemoryStore {
   }
 
   // Save/remember a new memory object
+  // Supports both object-arg signature (remember(obj)) and positional args (remember(type, title, content, opts)).
+  // opts.id allows callers to preserve an existing ID (Slice 2B).
   remember(typeOrObj, title, content, opts = {}) {
-    let type, tags, source, relations;
+    let type, tags, source, relations, id;
     if (typeOrObj && typeof typeOrObj === 'object') {
       const o = typeOrObj;
       type = o.type;
@@ -123,14 +125,16 @@ class MemoryStore {
       tags = o.tags;
       source = o.source;
       relations = o.relations;
+      id = o.id;
     } else {
       type = typeOrObj;
       tags = opts.tags;
       source = opts.source;
       relations = opts.relations;
+      id = opts.id;
     }
 
-    const obj = new MemoryObject({ type, title, content, tags, source, relations });
+    const obj = new MemoryObject({ id, type, title, content, tags, source, relations });
     this.objects.set(obj.id, obj);
     this.save();
 
@@ -158,7 +162,7 @@ class MemoryStore {
           source: sourceStr
         });
       } catch (e) {
-        // Silent fail
+        // Dual-write failure is contained
       }
     }
 
@@ -211,6 +215,13 @@ class MemoryStore {
     const obj = this.objects.get(id);
     if (!obj) return false;
     this.objects.delete(id);
+    if (this.sqliteStore) {
+      try {
+        this.sqliteStore.forget(id);
+      } catch (e) {
+        // Dual-delete failure is contained
+      }
+    }
     // Remove markdown file
     const filename = `${obj.type}-${obj.id}.md`;
     const filePath = path.join(this.memDir, filename);
