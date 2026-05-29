@@ -1,9 +1,0 @@
-{
-  "runId": "57bc8742-ad0",
-  "createdAt": 1780030276695,
-  "taskType": "multi_step",
-  "activeAgentId": "conductor",
-  "modelPreset": "default",
-  "promptPreview": "whats the workspace status?",
-  "dashboardUrl": "http://localhost:3000/run/57bc8742-ad0"
-}

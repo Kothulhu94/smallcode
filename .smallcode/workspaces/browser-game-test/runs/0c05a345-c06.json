@@ -1,9 +1,0 @@
-{
-  "runId": "0c05a345-c06",
-  "createdAt": 1780030657360,
-  "taskType": "coding",
-  "activeAgentId": "code_editor",
-  "modelPreset": "default",
-  "promptPreview": "create the start menu for the browser based game using typescript, also give me a list of dependencies you need",
-  "dashboardUrl": "http://localhost:3000/run/0c05a345-c06"
-}

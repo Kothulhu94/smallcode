@@ -1,9 +1,0 @@
-{
-  "runId": "74889932-76b",
-  "createdAt": 1780031919968,
-  "taskType": "multi_step",
-  "activeAgentId": "conductor",
-  "modelPreset": "default",
-  "promptPreview": "Set the active workspace rootPath to D:\\BrowserGameTest. Create the folder if it does not exist. Then show workspace status.",
-  "dashboardUrl": "http://localhost:3000/run/74889932-76b"
-}
