@@ -240,7 +240,7 @@ function getToolsForCategory(category) {
     case 'run':
       return ['bash', 'run', 'read_file'];
     case 'plan':
-      return ['read_file', 'write_file', 'patch', 'bash', 'search', 'find_files', 'graph_search', 'memory_load', 'memory_remember', 'bone_compile', 'bone_check', 'read_and_patch', 'create_and_run', 'find_and_read', 'search_and_read'];
+      return ['read_file', 'write_file', 'patch', 'bash', 'search', 'find_files', 'graph_search', 'memory_load', 'memory_remember', 'bone_compile', 'bone_check', 'read_and_patch', 'create_and_run', 'find_and_read', 'search_and_read', 'workspace_create', 'workspace_list', 'workspace_set_active', 'workspace_status', 'workspace_add_task', 'workspace_add_plan', 'workspace_add_artifact', 'workspace_link_run', 'workspace_set_root'];
     case 'web':
       return ['web_search', 'web_fetch', 'read_file'];
     case 'respond':

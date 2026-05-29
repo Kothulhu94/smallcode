@@ -26,13 +26,31 @@ async function chatCompletion(ctx) {
   };
 
   try {
-    const { extractImages, formatImagesForAPI, modelSupportsVision } = require('../src/session/images');
+    const { extractImages, formatImagesForAPI } = require('../src/session/images');
+    const { probeVisionSupport } = require('../src/vision/vision_capability_probe');
+    const probe = probeVisionSupport({ ...config, activeModelTarget: target });
+
+    let firstImagePath = null;
+    let hasImages = false;
+
     const processedMessages = conversationHistory.map(msg => {
       if (msg.role !== 'user' || typeof msg.content !== 'string') return msg;
       const images = extractImages(msg.content, process.cwd());
-      if (images.length === 0 || !modelSupportsVision(target.model)) return msg;
+      if (images.length > 0) {
+        hasImages = true;
+        if (!firstImagePath) firstImagePath = images[0].path;
+      }
+      if (images.length === 0 || !probe.supported) return msg;
       return { ...msg, content: [{ type: 'text', text: msg.content }, ...formatImagesForAPI(images)] };
     });
+
+    if (hasImages && !probe.supported) {
+      return {
+        error: "Vision input is not supported by the active model endpoint",
+        imagePath: firstImagePath,
+        hint: "Screenshot was captured/stored, but the active model endpoint cannot analyze images."
+      };
+    }
 
     const _tools = ctx.getAllTools(config);
     const body = {
@@ -68,6 +86,13 @@ async function chatCompletion(ctx) {
       // back, including the Authorization header value, when responding
       // with 401/403. Never print raw provider errors verbatim.
       console.log(`  \x1b[31m✗ API error ${response.status}: ${redactString(err.slice(0, 200))}\x1b[0m`);
+      if (hasImages) {
+        return {
+          error: "Vision input is not supported by the active model endpoint",
+          imagePath: firstImagePath,
+          hint: `The endpoint rejected the image payload. Status: ${response.status}. Error: ${err.slice(0, 200)}`
+        };
+      }
       return null;
     }
 
@@ -84,6 +109,27 @@ async function chatCompletion(ctx) {
     return data;
   } catch (err) {
     console.log(`  \x1b[31m✗ ${err.message}\x1b[0m`);
+    // Find if there were images in conversationHistory
+    const { extractImages } = require('../src/session/images');
+    let hasImages = false;
+    let firstImagePath = null;
+    for (const msg of conversationHistory) {
+      if (msg.role === 'user' && typeof msg.content === 'string') {
+        const images = extractImages(msg.content, process.cwd());
+        if (images.length > 0) {
+          hasImages = true;
+          firstImagePath = images[0].path;
+          break;
+        }
+      }
+    }
+    if (hasImages) {
+      return {
+        error: "Vision input is not supported by the active model endpoint",
+        imagePath: firstImagePath,
+        hint: `Network/API connection failed: ${err.message}`
+      };
+    }
     return null;
   }
 }
@@ -247,7 +293,24 @@ function buildSystemPrompt(ctx) {
   const skillCtx = getSkillContext(ctx);
   const pluginCtx = getPluginPrompts(ctx);
 
-  let prompt = `You are SmallCode, a coding assistant that operates in the user's project directory.
+  const { getActiveAgentContext } = require('../src/governor/agent_registry');
+  const agentCtx = ctx.activeAgent || getActiveAgentContext(currentTaskType);
+  let agentIdentityLine = '';
+  if (agentCtx) {
+    agentIdentityLine = `\n\n[ACTIVE_AGENT]\nid: ${agentCtx.agentId}\nname: ${agentCtx.name}\nrole: ${agentCtx.description}\n[/ACTIVE_AGENT]`;
+  }
+
+  let workspaceIdentityLine = '';
+  try {
+    const { getActiveWorkspace, loadWorkspaceManifest } = require('../src/governor/project_workspace');
+    const activeId = getActiveWorkspace();
+    if (activeId) {
+      const manifest = loadWorkspaceManifest(activeId);
+      workspaceIdentityLine = `\n\n[ACTIVE_WORKSPACE]\nid: ${manifest.projectId}\nname: ${manifest.name}\ngoal: ${manifest.activeGoal || 'No active goal set.'}\n[/ACTIVE_WORKSPACE]`;
+    }
+  } catch (e) {}
+
+  let prompt = `You are SmallCode, a coding assistant that operates in the user's project directory.${agentIdentityLine}${workspaceIdentityLine}
 
 You have tools to read, write, and edit files, run shell commands, and search code.
 You also have project memory and compound tools that do multiple operations in one call.
@@ -276,18 +339,29 @@ Rules:
 
   prompt += `\nWorking directory: ${process.cwd()}`;
   prompt += memCtx + skillCtx + pluginCtx;
+
+  if (config && config.activeEscalationSummary) {
+    prompt += '\n\n' + config.activeEscalationSummary;
+  }
+
+  if (config && config.activeHandoffPrompt) {
+    prompt += '\n\n' + config.activeHandoffPrompt;
+  }
+
   return prompt;
 }
 
 function getMemoryContext(ctx) {
   try {
-    const { memoryStore, conversationHistory } = ctx;
+    const { memoryStore, conversationHistory, currentTaskType } = ctx;
     if (!memoryStore || !memoryStore.loadForTask) return '';
     const lastUser = [...conversationHistory].reverse().find(m => m.role === 'user');
     if (!lastUser) return '';
-    const { objects } = memoryStore.loadForTask(lastUser.content, 800);
+    const raw = memoryStore.loadForTask(lastUser.content, 800, { taskType: currentTaskType });
+    const objects = Array.isArray(raw) ? raw : (raw?.objects || []);
     if (objects.length === 0) return '';
-    return '\n\nRelevant project memory:\n' + objects.map(o => `[${o.type}] ${o.title}: ${o.content}`).join('\n');
+    const { renderMemoryForContext } = require('./memory');
+    return '\n\nRelevant project memory:\n' + objects.map(o => renderMemoryForContext(o).trim()).join('\n');
   } catch { return ''; }
 }
 

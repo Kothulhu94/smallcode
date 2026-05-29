@@ -192,17 +192,18 @@ test('Slice 2C - maxTokens trims results by real token cost, not by count', () =
   //   content = row.text                                <- full text
   //   type    = row.category
   // The token estimator renders: `[type] title: content\n`
-  const CONTENT = 'x'.repeat(60) + ' testing recall';  // 76 chars, no newline
-  const DERIVED_TITLE = CONTENT.slice(0, 80);           // same as full content (< 80)
+  const CONTENT_BASE = 'x'.repeat(58) + ' testing recall ';
+  let firstId;
+  for (let i = 1; i <= 4; i++) {
+    const itemContent = CONTENT_BASE + String(i).padStart(2, '0');
+    const obj = store.remember('context', `Note ${i}`, itemContent, { tags: ['testing'] });
+    if (i === 1) firstId = obj.id;
+  }
 
   // Pre-compute the exact rendered token cost loadForTask will produce.
-  const sampleRendered = `[context] ${DERIVED_TITLE}: ${CONTENT}\n`;
+  const sampleContent = CONTENT_BASE + '01';
+  const sampleRendered = `[context:${firstId}] Note 1 — ${sampleContent}\n`;
   const costPerItem = Math.ceil(sampleRendered.length / 4);
-
-  // Write 4 identical-cost memories (keywords differ so all match the query).
-  for (let i = 1; i <= 4; i++) {
-    store.remember('context', `Note ${i}`, CONTENT, { tags: ['testing'] });
-  }
 
   // Budget that fits exactly 2 items — the third must be cut.
   const budget = costPerItem * 2;

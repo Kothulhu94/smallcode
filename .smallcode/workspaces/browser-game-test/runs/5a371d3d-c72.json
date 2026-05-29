@@ -1,0 +1,9 @@
+{
+  "runId": "5a371d3d-c72",
+  "createdAt": 1780029232498,
+  "taskType": "multi_step",
+  "activeAgentId": "conductor",
+  "modelPreset": "default",
+  "promptPreview": "Create a workspace named Browser Game Test. Set it as the active workspace. Goal: build a tiny browser game prototype. Do not edit source files yet.",
+  "dashboardUrl": "http://localhost:3000/run/5a371d3d-c72"
+}

@@ -117,7 +117,11 @@ const tokenMonitor = new TokenMonitor();
 const traceRecorder = new TraceRecorder(process.cwd());
 let currentToolCategory = null; // Set per-turn by compiled tool router
 let currentTaskType = 'coding';
+let currentAgentContext = null;
 let config = null; // Set in main(), used by executeTool and chatCompletion
+let currentLedgerRunId = null;
+let currentLedgerPromptTokens = 0;
+let currentLedgerCompletionTokens = 0;
 
 // Initialize escalation engine (lazy — resolves config at boot)
 let escalationEngine = null; // created after config loads
@@ -456,6 +460,9 @@ async function executeTool(name, args) {
     flags,
     config,
     tui,
+    currentTaskType,
+    _ledgerRunId: currentLedgerRunId,
+    activeAgent: currentAgentContext,
   });
 
   try { if (dedup) dedup.record(name, args, result); } catch {}
@@ -468,9 +475,11 @@ async function executeTool(name, args) {
 // getAllTools delegates to the module with plugin/mcp context.
 // Trust decay (Feature 13): dropped tools filtered from schema list.
 // Feature 2: Query routing — filter write tools for read-only plan steps.
-function getAllTools(config, stage2Category) {
+// Agent filtering: final pass intersects with currentAgentContext.allowedTools.
+function getAllTools(config, stage2Category, options = {}) {
   const tools = _getAllToolsModule(config, stage2Category, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
   let filtered = tools;
+  const taskType = options.taskType || currentTaskType;
 
   // Feature 2: if plan is active and current step is a query, filter write tools
   try {
@@ -486,12 +495,150 @@ function getAllTools(config, stage2Category) {
     }
   } catch {}
 
+  // Agent permission filtering: intersect the category-filtered tool list with
+  // the active agent's allowedTools whitelist. This ensures a qa_tester cannot
+  // receive workspace_create (even when the compiled router's 'plan' category
+  // includes it), and a conductor always receives workspace_* tools.
+  // Dynamic MCP tools (mcp__ prefix or colon in name) and the two-stage category
+  // selector ('select_category') bypass this filter.
+  const agentCtx = options.agentContext || currentAgentContext;
+  if (agentCtx && Array.isArray(agentCtx.allowedTools)) {
+    const allowedSet = new Set(agentCtx.allowedTools);
+    let tempFiltered = filtered.filter(t => {
+      if (!t || !t.function) return false;
+      const name = t.function.name;
+      if (name === 'select_category' || name.startsWith('mcp__') || name.includes(':')) return true;
+      return allowedSet.has(name);
+    });
+
+    // If intersection is empty, but we had tools before filtering, it means the category-filtering
+    // was too restrictive or incompatible with this agent. Fall back to direct (un-categorized) tools.
+    if (tempFiltered.length === 0 && filtered.length > 0 && stage2Category) {
+      const fallbackTools = _getAllToolsModule(config, null, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
+      tempFiltered = fallbackTools.filter(t => {
+        if (!t || !t.function) return false;
+        const name = t.function.name;
+        if (name === 'select_category' || name.startsWith('mcp__') || name.includes(':')) return true;
+        return allowedSet.has(name);
+      });
+    }
+    filtered = tempFiltered;
+  }
+
+  // Ensure code_editor receives whitelisted core file tools on coding/backend/editing tasks
+  if (agentCtx && agentCtx.agentId === 'code_editor' && ['coding', 'backend', 'editing'].includes(taskType)) {
+    const requiredTools = ['read_file', 'write_file', 'patch', 'read_and_patch', 'create_and_run'];
+    const allowedSet = new Set(agentCtx.allowedTools);
+    const fallbackTools = _getAllToolsModule(config, null, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
+    for (const toolName of requiredTools) {
+      if (allowedSet.has(toolName) && !filtered.some(t => t.function && t.function.name === toolName)) {
+        const toolObj = fallbackTools.find(t => t.function && t.function.name === toolName);
+        if (toolObj) {
+          filtered.push(toolObj);
+        }
+      }
+    }
+  }
+
   try {
     const { getTrustDecay } = require('../src/tools/trust_decay');
     return getTrustDecay().filterAndSort(filtered);
   } catch {
     return filtered;
   }
+}
+
+function buildChatRequestBody(messages, tools, config, options = {}) {
+  let target = options.target || config.activeModelTarget || getModelTarget(config, 'default');
+  let requestConfig = withModelTarget(config, target);
+  let baseUrl = options.baseUrl || target.baseUrl;
+  const currentAttempt = options.currentAttempt || 0;
+
+  const body = {
+    model: target.model,
+    messages: messages,
+    temperature: 0.1,
+    max_tokens: parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS) || 8192,
+  };
+
+  // Determine if tools are disabled
+  let toolsDisabledReason = null;
+  if (config.tools && config.tools.disabled === true) {
+    toolsDisabledReason = 'Tools are explicitly disabled in config.';
+  } else if (target && target.provider) {
+    try {
+      const { providerRegistry } = require('../src/compiled/providers/registry');
+      if (providerRegistry.has(target.provider)) {
+        const caps = providerRegistry.getCapabilities(target.provider);
+        if (caps && caps.tools === false) {
+          toolsDisabledReason = `Tools are not supported by provider '${target.provider}'.`;
+        }
+      }
+    } catch {}
+  }
+
+  // Include tools only when not disabled
+  if (toolsDisabledReason) {
+    body.__toolsDisabledReason = toolsDisabledReason;
+  } else if (tools && tools.length > 0) {
+    body.tools = tools;
+  }
+
+  // Multi-model chaining (Feature #15)
+  try {
+    const { getExecutorModel } = require('../src/model/chain');
+    body.model = getExecutorModel('', config);
+  } catch {}
+
+  // MarrowScript Rank 8: adaptive model routing
+  try {
+    const { getAdaptiveRouter } = require('../src/model/adaptive_router');
+    const router = getAdaptiveRouter();
+    const selected = router.selectModel(requestConfig);
+    if (selected.model && selected.model !== body.model) {
+      if (typeof _fullscreenRef !== 'undefined' && _fullscreenRef) {
+        _fullscreenRef.addTool?.('adaptive', 'ok', `→ ${selected.model} (high failure rate)`);
+      }
+      target = {
+        ...getModelTargetForModel(config, selected.model, selected.tier || target.tier),
+        tier: selected.tier || target.tier,
+        model: selected.model,
+        name: selected.model,
+        baseUrl: selected.url || target.baseUrl,
+      };
+      requestConfig = withModelTarget(config, target);
+      baseUrl = target.baseUrl;
+      body.model = target.model;
+    }
+  } catch {}
+
+  // Apply thinking budget
+  try {
+    const { applyThinkingBudget } = require('../src/model/thinking_budget');
+    applyThinkingBudget(body, { baseUrl });
+  } catch {}
+
+  // Fix #44b: OpenAI reasoning models
+  {
+    const _bUrl = (baseUrl || '').toLowerCase();
+    const _isOpenAICloud = _bUrl.includes('api.openai.com') || _bUrl.includes('openrouter.ai');
+    const _modelLower = String(body.model || '').toLowerCase();
+    const _isReasoning = /(^|[\/\-_])(o1|o3|o4)/.test(_modelLower);
+    if (_isOpenAICloud && _isReasoning && body.max_tokens && !body.max_completion_tokens) {
+      body.max_completion_tokens = body.max_tokens;
+      delete body.max_tokens;
+    }
+  }
+
+  // Adaptive retry temperature
+  if (currentAttempt > 0) {
+    try {
+      const { applyAdaptiveTemperature } = require('../src/model/adaptive_temp');
+      applyAdaptiveTemperature(body, currentAttempt, { isRepair: true });
+    } catch {}
+  }
+
+  return { body, target, requestConfig, baseUrl };
 }
 let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS, ...PROVIDER_TOOLS];
 
@@ -521,10 +668,180 @@ function estimateHistoryTokens(history) {
 }
 
 async function runAgentLoop(userMessage, config) {
+  let runStatus = 'completed';
+  try {
+    await _runAgentLoopInner(userMessage, config);
+  } catch (err) {
+    runStatus = 'error';
+    throw err;
+  } finally {
+    if (currentLedgerRunId) {
+      try {
+        const { getLedger } = require('../src/governor/run_ledger');
+        getLedger().endRun(currentLedgerRunId, {
+          status: runStatus,
+          promptTokens: currentLedgerPromptTokens,
+          completionTokens: currentLedgerCompletionTokens
+        });
+      } catch (e) {}
+      currentLedgerRunId = null;
+    }
+  }
+}
+
+async function _runAgentLoopInner(userMessage, config) {
   // Reset early-stop state for new turn
   earlyStop.newTurn();
   // Reset quality monitor's consecutive-correction window for the new turn.
   qualityMonitor.reset();
+
+  if (config) {
+    delete config.activeEscalationSummary;
+    delete config.activeHandoffPrompt;
+    delete config.activeHandoffPacket;
+  }
+
+  const { createFailureState, updateFailureState, classifyFailureEvent } = require('../src/governor/escalation_policy');
+  const failureState = createFailureState();
+  let terminalFailureReached = false;
+
+  const triggerAgentEscalation = (reasonType, detail = {}) => {
+    try {
+      const { shouldEscalate, resolveEscalationTarget, buildEscalationSummary } = require('../src/governor/escalation_policy');
+      const escCheck = shouldEscalate(failureState, currentAgentContext, { maxToolCalls: MAX_TOOL_CALLS, userMessage });
+      if (!escCheck.escalate) return false;
+
+      if (escCheck.terminal) {
+        console.log(chalk.red(`\n  ✗ Terminal failure: ${escCheck.reason} — ${escCheck.summary}`));
+        terminalFailureReached = true;
+        return 'terminal';
+      }
+
+      const prevAgentId = currentAgentContext.agentId;
+      const prevAgentName = currentAgentContext.name;
+      const prevPreset = currentAgentContext.modelPreset;
+
+      const targetResolve = resolveEscalationTarget(currentAgentContext, escCheck.reason, {
+        toolName: detail.toolName,
+        pastEscalations: failureState.pastEscalations
+      });
+
+      if (targetResolve.terminal) {
+        console.log(chalk.red(`\n  ✗ Terminal escalation: ${targetResolve.reason}`));
+        terminalFailureReached = true;
+        return 'terminal';
+      }
+
+      const { getActiveAgentContext } = require('../src/governor/agent_registry');
+      const targetAgent = getActiveAgentContext(targetResolve.target) || getActiveAgentContext('multi_step');
+
+      currentAgentContext = targetAgent;
+      failureState.pastEscalations.push({
+        from: prevAgentId,
+        to: targetAgent.agentId,
+        reason: escCheck.reason
+      });
+
+      // Re-resolve model target preset
+      if (config.models && currentAgentContext && currentAgentContext.modelPreset) {
+        const { resolveModelTargetForAgent } = require('../src/model/router');
+        const newTarget = resolveModelTargetForAgent(currentAgentContext, config);
+        if (newTarget) {
+          config.activeModelTarget = newTarget;
+        }
+      }
+
+      // Query ledger details for handoff if available
+      let toolEvents = null;
+      let memoryEvents = null;
+      if (currentLedgerRunId) {
+        try {
+          const { getLedger } = require('../src/governor/run_ledger');
+          const ledger = getLedger();
+          toolEvents = ledger.getToolCalls(currentLedgerRunId);
+          memoryEvents = ledger.getMemoryContextEvents(currentLedgerRunId);
+        } catch (e) {}
+      }
+
+      // Create handoff packet
+      const { createHandoffPacket, renderHandoffForPrompt } = require('../src/governor/handoff_packet');
+      const handoffPacket = createHandoffPacket({
+        runId: currentLedgerRunId,
+        fromAgentId: prevAgentId,
+        toAgentId: targetAgent.agentId,
+        taskType: currentTaskType,
+        reason: escCheck.reason,
+        summary: escCheck.summary,
+        userMessage,
+        failureState,
+        editedFiles: _editedFilesThisTurn,
+        modelPresetBefore: prevPreset,
+        modelPresetAfter: targetAgent.modelPreset,
+        toolEvents,
+        memoryEvents
+      });
+
+      config.activeHandoffPacket = handoffPacket;
+      config.activeHandoffPrompt = renderHandoffForPrompt(handoffPacket);
+
+      // Link handoff packet to active workspace
+      try {
+        const { getActiveWorkspace, linkHandoffToWorkspace } = require('../src/governor/project_workspace');
+        const activeId = getActiveWorkspace();
+        if (activeId) {
+          linkHandoffToWorkspace(activeId, handoffPacket);
+        }
+      } catch (wsErr) {
+        // Workspace failure must not crash the harness
+      }
+
+      // Record in run ledger
+      if (currentLedgerRunId) {
+        const { getLedger } = require('../src/governor/run_ledger');
+        const ledger = getLedger();
+        
+        ledger.recordStep({
+          runId: currentLedgerRunId,
+          stepIndex: loopStepIndex++,
+          stepType: 'agent_escalation',
+          name: `${prevAgentId} -> ${targetAgent.agentId}`,
+          durationMs: 0,
+          success: true,
+          summary: `Escalated from ${prevAgentName} to ${targetAgent.name}. Reason: ${escCheck.reason}. Summary: ${escCheck.summary}`
+        });
+
+        ledger.recordStep({
+          runId: currentLedgerRunId,
+          stepIndex: loopStepIndex++,
+          stepType: 'agent_handoff',
+          name: `${prevAgentId} -> ${targetAgent.agentId}`,
+          durationMs: 0,
+          success: true,
+          summary: config.activeHandoffPrompt
+        });
+      }
+
+      // Build escalation note
+      config.activeEscalationSummary = buildEscalationSummary(failureState, {
+        reason: escCheck.reason,
+        target: targetAgent.agentId,
+        from: prevAgentId,
+        summary: escCheck.summary
+      });
+
+      conversationHistory.push({ role: 'system', content: config.activeEscalationSummary });
+      conversationHistory.push({ role: 'system', content: config.activeHandoffPrompt });
+
+      console.log(chalk.magenta(`\n  ⬆ [ESCALATING AGENT] ${prevAgentName} → ${currentAgentContext.name} (${escCheck.reason})`));
+      if (_fullscreenRef) {
+        _fullscreenRef.addTool('escalate', 'warn', `${prevAgentId} → ${targetAgent.agentId}`);
+      }
+
+      return true;
+    } catch (err) {
+      return false;
+    }
+  };
 
   // Reset per-turn idempotent-write dedup. PURE_TOOLS dedup uses a sliding
   // window across turns; this set is *per-turn* and stops `memory_remember`
@@ -729,6 +1046,107 @@ async function runAgentLoop(userMessage, config) {
     currentTaskType = classifyTask(userMessage);
   }
 
+  const { getActiveAgentContext } = require('../src/governor/agent_registry');
+  currentAgentContext = getActiveAgentContext(currentTaskType) || getActiveAgentContext('multi_step');
+
+  // Milestone 9: Model Preset Routing
+  // Resolve model target from active agent preset first if config.models is configured
+  let selectedTarget = null;
+  let selectedTier = null;
+
+  if (config.models && currentAgentContext && currentAgentContext.modelPreset) {
+    try {
+      const { resolveModelTargetForAgent } = require('../src/model/router');
+      selectedTarget = resolveModelTargetForAgent(currentAgentContext, config);
+      if (selectedTarget) {
+        selectedTier = currentAgentContext.modelPreset;
+      }
+    } catch (e) {}
+  }
+
+  // Preserve existing complexity-based routing behavior as fallback
+  if (!selectedTarget && (config.models || process.env.SMALLCODE_USE_TIER_ROUTING === 'true')) {
+    try {
+      const { routeToTier, estimateComplexity, isCompiledCognitionAvailable } = require('./cognition_adapter');
+      if (isCompiledCognitionAvailable()) {
+        const complexity = estimateComplexity(userMessage);
+        const route = routeToTier(complexity);
+        if (route) {
+          if (config.models) {
+            if (route.tier === 'trivial') selectedTarget = getModelTarget(config, 'fast');
+            else if (route.tier === 'simple') selectedTarget = getModelTarget(config, 'default');
+            else selectedTarget = getModelTarget(config, 'strong');
+          }
+          selectedTier = route.tier;
+        }
+      }
+    } catch {}
+
+    // Fallback: hand-rolled routeModel
+    if (!selectedTarget && config.models) {
+      try {
+        const { routeTier } = require('../src/model/router');
+        const tier = routeTier(userMessage);
+        selectedTarget = getModelTarget(config, tier);
+        selectedTier = tier;
+      } catch {}
+    }
+  }
+
+  if (selectedTarget && selectedTarget.model) {
+    config.activeModelTarget = selectedTarget;
+    if (_fullscreenRef && selectedTarget.model !== config.model.name) {
+      _fullscreenRef.addTool('router', 'ok', `→ ${selectedTarget.model}${selectedTier ? ' (' + selectedTier + ')' : ''}`);
+    }
+  }
+
+  let loopStepIndex = 0;
+
+  try {
+    const { getLedger } = require('../src/governor/run_ledger');
+    currentLedgerRunId = getLedger().startRun({
+      prompt: userMessage,
+      model: config.activeModelTarget?.model || config.model?.name,
+      taskType: currentTaskType,
+      agentId: currentAgentContext ? currentAgentContext.agentId : null,
+      modelPreset: currentAgentContext ? currentAgentContext.modelPreset : null,
+    });
+
+    if (currentLedgerRunId) {
+      try {
+        const { getActiveWorkspace, linkRunToWorkspace } = require('../src/governor/project_workspace');
+        const activeId = getActiveWorkspace();
+        if (activeId) {
+          linkRunToWorkspace(activeId, currentLedgerRunId, {
+            createdAt: Date.now(),
+            taskType: currentTaskType,
+            activeAgentId: currentAgentContext ? currentAgentContext.agentId : null,
+            modelPreset: currentAgentContext ? currentAgentContext.modelPreset : null,
+            promptPreview: userMessage
+          });
+        }
+      } catch (wsErr) {
+        // Workspace failure must not crash the harness
+      }
+
+      if (currentAgentContext) {
+        getLedger().recordStep({
+          runId: currentLedgerRunId,
+          stepIndex: loopStepIndex++,
+          stepType: 'agent_dispatch',
+          name: currentAgentContext.name,
+          durationMs: 0,
+          success: true,
+          summary: `Dispatched task to ${currentAgentContext.name} (${currentAgentContext.agentId}) with model preset: ${currentAgentContext.modelPreset}`
+        });
+      }
+    }
+  } catch (e) {
+    currentLedgerRunId = null;
+  }
+  currentLedgerPromptTokens = 0;
+  currentLedgerCompletionTokens = 0;
+
   // Deterministic tool routing: classify intent → filter tool schemas
   // Zero tokens, zero latency — compiled from marrow/tool_router.marrow
   try {
@@ -780,43 +1198,7 @@ async function runAgentLoop(userMessage, config) {
     }
   } catch {} // Never block on context retrieval
 
-  // Multi-model routing: pick model based on task complexity (if configured)
-  // Phase C: Marrowscript-compiled coding_router for tier-based dispatch.
-  // Falls back to hand-rolled routeTier() if compiled router unavailable.
-  if (config.models || process.env.SMALLCODE_USE_TIER_ROUTING === 'true') {
-    let selectedTarget = null;
-    let selectedTier = null;
-    try {
-      const { routeToTier, estimateComplexity, isCompiledCognitionAvailable } = require('./cognition_adapter');
-      if (isCompiledCognitionAvailable()) {
-        const complexity = estimateComplexity(userMessage);
-        const route = routeToTier(complexity);
-        if (route) {
-          // Map tier back to a model target when config.models is set.
-          if (config.models) {
-            if (route.tier === 'trivial') selectedTarget = getModelTarget(config, 'fast');
-            else if (route.tier === 'simple') selectedTarget = getModelTarget(config, 'default');
-            else selectedTarget = getModelTarget(config, 'strong');
-          }
-          selectedTier = route.tier;
-        }
-      }
-    } catch {}
 
-    // Fallback: hand-rolled routeModel
-    if (!selectedTarget && config.models) {
-      const tier = routeTier(userMessage);
-      selectedTarget = getModelTarget(config, tier);
-      selectedTier = tier;
-    }
-
-    if (selectedTarget && selectedTarget.model) {
-      config.activeModelTarget = selectedTarget;
-      if (_fullscreenRef && selectedTarget.model !== config.model.name) {
-        _fullscreenRef.addTool('router', 'ok', `→ ${selectedTarget.model}${selectedTier ? ' (' + selectedTier + ')' : ''}`);
-      }
-    }
-  }
 
   // Auto-compact: estimate tokens and aggressively trim to stay within context window
   // Fix: trigger on EITHER token overflow OR message count (not just one condition for both).
@@ -903,6 +1285,7 @@ async function runAgentLoop(userMessage, config) {
     }
   } catch {}
 
+  // loopStepIndex initialized earlier
   while (toolCallsThisTurn < MAX_TOOL_CALLS) {
     // Mid-turn context check: if history is getting too large, evict old tool results
     // This prevents context overflow during long tool-call chains
@@ -983,10 +1366,43 @@ async function runAgentLoop(userMessage, config) {
       }
     }
 
+    const modelStart = Date.now();
     const response = await chatCompletion(config, conversationHistory);
+    const modelDuration = Date.now() - modelStart;
+
+    if (response && response.usage && currentLedgerRunId) {
+      currentLedgerPromptTokens += response.usage.prompt_tokens || 0;
+      currentLedgerCompletionTokens += response.usage.completion_tokens || 0;
+    }
+
+    if (currentLedgerRunId) {
+      try {
+        const { getLedger } = require('../src/governor/run_ledger');
+        const message = response?.choices?.[0]?.message;
+        const summary = message?.content ? message.content.slice(0, 100) : (response ? 'Model generated tool calls or response' : 'No response from model');
+        getLedger().recordStep({
+          runId: currentLedgerRunId,
+          stepIndex: loopStepIndex++,
+          stepType: 'model_response',
+          name: response?.model || config.model.name,
+          durationMs: modelDuration,
+          success: !!response,
+          summary,
+        });
+      } catch (e) {}
+    }
 
     if (!response) {
       console.log('  \x1b[31m✗ No response from model\x1b[0m');
+      updateFailureState(failureState, { type: 'model_failure' });
+      const escalated = triggerAgentEscalation('model_failure');
+      if (escalated) {
+        if (escalated === 'terminal') {
+          terminalFailureReached = true;
+          break;
+        }
+        continue;
+      }
       break;
     }
 
@@ -1099,6 +1515,7 @@ async function runAgentLoop(userMessage, config) {
       const __validationErrors = [];
 
       conversationHistory.push(message);
+      let escalatedThisTurn = false;
 
       // Plan extraction (Feature 8): if the model emitted a plan in its
       // textual content, capture it now so subsequent turns can re-inject it.
@@ -1231,6 +1648,40 @@ async function runAgentLoop(userMessage, config) {
           durationMs: toolMs,
           summary: resultSummary,
         });
+
+        const toolExecEvent = {
+          type: 'tool_execution',
+          name: toolName,
+          args: toolArgs,
+          result: result
+        };
+        updateFailureState(failureState, toolExecEvent);
+        const classified = classifyFailureEvent(toolExecEvent);
+        if (classified) {
+          const escalated = triggerAgentEscalation(classified, { toolName });
+          if (escalated) {
+            if (escalated === 'terminal') {
+              terminalFailureReached = true;
+              break;
+            }
+            escalatedThisTurn = true;
+            break;
+          }
+        }
+
+        if (toolCallsThisTurn >= MAX_TOOL_CALLS) {
+          updateFailureState(failureState, { type: 'max_tool_calls' });
+          const escalated = triggerAgentEscalation('max_tool_calls');
+          if (escalated) {
+            if (escalated === 'terminal') {
+              terminalFailureReached = true;
+              break;
+            }
+            toolCallsThisTurn = 0;
+            escalatedThisTurn = true;
+            break;
+          }
+        }
 
         // Track validation errors so the poisoned-history fix can revert
         // bad assistant turns where the model emitted malformed tool args.
@@ -1650,6 +2101,13 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
         }
       }
 
+      if (escalatedThisTurn) {
+        if (terminalFailureReached) {
+          break;
+        }
+        continue;
+      }
+
       // Poisoned-history fix: if EVERY tool call in this turn produced a
       // validation error, revert history and inject a single correction note.
       // Without this, the model sees its own malformed tool calls + error
@@ -1708,6 +2166,7 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       }
     }
 
+    let finalContent = '';
     // Stream the final response for better UX
     if (message.content) {
       // Contract done-guard: if a contract is active and the model claims
@@ -1727,6 +2186,7 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       } catch {}
 
       conversationHistory.push({ role: 'assistant', content: message.content });
+      finalContent = message.content;
 
       // Reviewer agent (Feature #18): async critique of the response when files
       // were edited this turn. Non-blocking — fires after history push, injects
@@ -1809,11 +2269,41 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       }
     } else if (toolCallsThisTurn === 0 && (!message.tool_calls || message.tool_calls.length === 0)) {
       // No content AND no tool calls AND no tools were called this turn — try streaming
+      const finalStart = Date.now();
       const streamedContent = await streamFinalResponse(config, conversationHistory);
+      const finalDuration = Date.now() - finalStart;
       if (streamedContent) {
         conversationHistory.push({ role: 'assistant', content: streamedContent });
+        finalContent = streamedContent;
+      }
+      if (currentLedgerRunId) {
+        try {
+          const { getLedger } = require('../src/governor/run_ledger');
+          getLedger().recordStep({
+            runId: currentLedgerRunId,
+            stepIndex: loopStepIndex++,
+            stepType: 'model_response',
+            name: config.model.name,
+            durationMs: finalDuration,
+            success: !!streamedContent,
+            summary: streamedContent ? streamedContent.slice(0, 100) : 'Final response summary',
+          });
+        } catch (e) {}
       }
     }
+
+    if (toolCallsThisTurn === 0 && finalContent.trim().length < 10) {
+      updateFailureState(failureState, { type: 'no_progress' });
+      const escalated = triggerAgentEscalation('no_progress');
+      if (escalated) {
+        if (escalated === 'terminal') {
+          terminalFailureReached = true;
+          break;
+        }
+        continue;
+      }
+    }
+
     // If tools were called but model returned empty content, that's fine — task is done.
     break;
   }
@@ -1884,7 +2374,7 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
   try {
     if (finishedTrace) {
       const { recordEvidence } = require('../src/memory/evidence');
-      recordEvidence(memoryStore, finishedTrace);
+      recordEvidence(memoryStore, finishedTrace, { taskType: currentTaskType });
     }
   } catch {} // never fail the agent loop on evidence-storage errors
 
@@ -1958,7 +2448,24 @@ function buildCompactSystemPrompt(taskType, messages) {
     }
   } catch {}
 
-  let prompt = `You are SmallCode, a coding agent. Working directory: ${process.cwd()}
+  const { getActiveAgentContext: _getActiveAgentCtx } = require('../src/governor/agent_registry');
+  const agentCtx = _getActiveAgentCtx(taskType) || currentAgentContext;
+  let agentIdentityLine = '';
+  if (agentCtx) {
+    agentIdentityLine = `\n\n[ACTIVE_AGENT]\nid: ${agentCtx.agentId}\nname: ${agentCtx.name}\nrole: ${agentCtx.description}\n[/ACTIVE_AGENT]`;
+  }
+
+  let workspaceIdentityLine = '';
+  try {
+    const { getActiveWorkspace, loadWorkspaceManifest } = require('../src/governor/project_workspace');
+    const activeId = getActiveWorkspace();
+    if (activeId) {
+      const manifest = loadWorkspaceManifest(activeId);
+      workspaceIdentityLine = `\n\n[ACTIVE_WORKSPACE]\nid: ${manifest.projectId}\nname: ${manifest.name}\ngoal: ${manifest.activeGoal || 'No active goal set.'}\n[/ACTIVE_WORKSPACE]`;
+    }
+  } catch (e) {}
+
+  let prompt = `You are SmallCode, a coding agent.${agentIdentityLine}${workspaceIdentityLine}\nWorking directory: ${process.cwd()}
 OS: ${os}${osHint}${bootstrapLine}
 
 Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it. If asked about the project, read README.md or relevant files — do not answer from the workspace context line above.
@@ -1979,11 +2486,24 @@ CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. l
     // Dynamic context goes into a separate [CONTEXT] user message — see
     // buildDynamicContext(). Plan + plugins stay here (system role = authoritative).
     prompt += getPluginPrompts() + getActivePlanContext() + getTestRunnerContext();
+    if (config && config.activeEscalationSummary) {
+      prompt += '\n\n' + config.activeEscalationSummary;
+    }
+    if (config && config.activeHandoffPrompt) {
+      prompt += '\n\n' + config.activeHandoffPrompt;
+    }
     return prompt;
   }
 
   // Legacy behavior: everything in the system prompt
   prompt += getMemoryContext(messages) + getSkillContext(messages) + getPluginPrompts() + getKnowledgeContext(messages) + getActivePlanContext() + getTestRunnerContext();
+
+  if (config && config.activeEscalationSummary) {
+    prompt += '\n\n' + config.activeEscalationSummary;
+  }
+  if (config && config.activeHandoffPrompt) {
+    prompt += '\n\n' + config.activeHandoffPrompt;
+  }
 
   return prompt;
 }
@@ -2058,7 +2578,7 @@ function getMemoryContext(messages) {
 
     // loadForTask returns scored objects; only include those with meaningful relevance
     const maxTokens = Math.min(800, Math.floor(((config?.context?.detected_window || 32768) * 0.03)));
-    const objects = memoryStore.loadForTask(lastUser.content, maxTokens);
+    const objects = memoryStore.loadForTask(lastUser.content, maxTokens, { taskType: currentTaskType, runId: currentLedgerRunId, activeAgent: currentAgentContext });
     // Handle both old format (array) and new format ({objects, tokens_used})
     const items = Array.isArray(objects) ? objects : (objects?.objects || []);
     if (items.length === 0) return '';
@@ -2067,8 +2587,9 @@ function getMemoryContext(messages) {
     let output = '\n\nRelevant project memory:\n';
     let chars = output.length;
     const maxChars = 3200;
+    const { renderMemoryForContext } = require('./memory');
     for (const o of items) {
-      const entry = `[${o.type}] ${o.title}: ${o.content}\n`;
+      const entry = renderMemoryForContext(o);
       if (chars + entry.length > maxChars) break;
       output += entry;
       chars += entry.length;
@@ -2174,7 +2695,13 @@ async function chatCompletion(config, messages) {
     // Older messages that had images already had their content consumed; re-reading
     // the image from disk on every call is both wasteful (disk I/O) and causes
     // context overflow (a 1MB PNG = ~330k base64 tokens sent on EVERY API call).
-    const { extractImages, formatImagesForAPI, modelSupportsVision } = require('../src/session/images');
+    const { extractImages, formatImagesForAPI } = require('../src/session/images');
+    const { probeVisionSupport } = require('../src/vision/vision_capability_probe');
+    const probe = probeVisionSupport({ ...config, activeModelTarget: target });
+
+    let firstImagePath = null;
+    let hasImages = false;
+
     const lastUserIdx = processedMessages.length > 0
       ? processedMessages.reduce((last, m, i) => m.role === 'user' ? i : last, -1)
       : -1;
@@ -2183,7 +2710,11 @@ async function chatCompletion(config, messages) {
       // Only extract images from the most recent user message
       if (idx !== lastUserIdx) return msg;
       const images = extractImages(msg.content, process.cwd());
-      if (images.length === 0 || !modelSupportsVision(target.model)) return msg;
+      if (images.length > 0) {
+        hasImages = true;
+        firstImagePath = images[0].path;
+      }
+      if (images.length === 0 || !probe.supported) return msg;
       return {
         ...msg,
         content: [
@@ -2193,86 +2724,35 @@ async function chatCompletion(config, messages) {
       };
     });
 
+    if (hasImages && !probe.supported) {
+      return {
+        error: "Vision input is not supported by the active model endpoint",
+        imagePath: firstImagePath,
+        hint: "Screenshot was captured/stored, but the active model endpoint cannot analyze images."
+      };
+    }
+
     const _tools = getAllTools(config, currentToolCategory);
-    const body = {
-      model: target.model,
-      messages: [systemMsg, ...processedWithImages],
-      temperature: 0.1,
-      max_tokens: parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS) || 8192,
-    };
-    // Only include tools when there are tools to send — some endpoints (OpenWebUI)
-    // error on an empty tools array rather than treating it as "no tools".
-    if (_tools && _tools.length > 0) {
-      body.tools = _tools;
+    const { body, target: finalTarget, requestConfig: finalRequestConfig, baseUrl: finalBaseUrl } = buildChatRequestBody(
+      [systemMsg, ...processedWithImages],
+      _tools,
+      config,
+      {
+        target,
+        baseUrl,
+        currentAttempt: Object.entries(improvementAttempts)
+          .filter(([k, v]) => !k.startsWith('__') && typeof v === 'number' && v > 0)
+          .reduce((acc, [, v]) => acc + v, 0),
+      }
+    );
+
+    target = finalTarget;
+    requestConfig = finalRequestConfig;
+    baseUrl = finalBaseUrl;
+
+    if (body.__toolsDisabledReason) {
+      console.log(`  \x1b[33m⚠ Tools disabled: ${body.__toolsDisabledReason}\x1b[0m`);
     }
-
-    // Multi-model chaining (Feature #15): override model name with executor
-    // if chain config is active. No-op when SMALLCODE_CHAIN is not set.
-    try {
-      const { getExecutorModel } = require('../src/model/chain');
-      body.model = getExecutorModel('', config); // task already classified at loop start
-    } catch {}
-
-    // MarrowScript Rank 8: adaptive model routing
-    // Override body.model when failure rate warrants a stronger model.
-    try {
-      const { getAdaptiveRouter } = require('../src/model/adaptive_router');
-      const router = getAdaptiveRouter();
-      const selected = router.selectModel(requestConfig);
-      if (selected.model && selected.model !== body.model) {
-        if (_fullscreenRef) _fullscreenRef.addTool('adaptive', 'ok', `→ ${selected.model} (high failure rate)`);
-        target = {
-          ...getModelTargetForModel(config, selected.model, selected.tier || target.tier),
-          tier: selected.tier || target.tier,
-          model: selected.model,
-          name: selected.model,
-          baseUrl: selected.url || target.baseUrl,
-        };
-        requestConfig = withModelTarget(config, target);
-        baseUrl = target.baseUrl;
-        body.model = target.model;
-      }
-    } catch {}
-
-    // Apply thinking budget for reasoning models (Qwen3, DeepSeek R1, Claude with
-    // thinking, GPT-5 reasoning). Without this, a small reasoning model can spend
-    // 8000 tokens "thinking" about a trivial rename. Defaults to 2000 tokens;
-    // override with SMALLCODE_THINKING_BUDGET. Set SMALLCODE_THINKING_DISABLE=true
-    // to turn it off entirely.
-    try {
-      const { applyThinkingBudget } = require('../src/model/thinking_budget');
-      applyThinkingBudget(body, { baseUrl });
-    } catch {} // optional — fall through if module unavailable
-
-    // Fix #44b: OpenAI reasoning models (o1, o3, o4) require
-    // `max_completion_tokens` instead of `max_tokens`. Sending `max_tokens`
-    // causes it to be silently ignored or produces a deprecation warning.
-    // Only rename the field when targeting OpenAI cloud or OpenRouter.
-    {
-      const _bUrl = (baseUrl || '').toLowerCase();
-      const _isOpenAICloud = _bUrl.includes('api.openai.com') || _bUrl.includes('openrouter.ai');
-      const _modelLower = String(body.model || '').toLowerCase();
-      const _isReasoning = /(^|[\/\-_])(o1|o3|o4)/.test(_modelLower);
-      if (_isOpenAICloud && _isReasoning && body.max_tokens && !body.max_completion_tokens) {
-        body.max_completion_tokens = body.max_tokens;
-        delete body.max_tokens;
-      }
-    }
-
-    // Adaptive retry temperature (Feature 12): nudge temperature per attempt.
-    // Only count attempts for the CURRENT file being validated (not stale entries
-    // from previous files that have already been fixed or reset).
-    try {
-      const { applyAdaptiveTemperature } = require('../src/model/adaptive_temp');
-      // Sum only numeric values (filePath keys) that are currently non-zero.
-      // Exclude __history:*, __decompose:* meta-keys and already-resolved (0) entries.
-      const currentAttempt = Object.entries(improvementAttempts)
-        .filter(([k, v]) => !k.startsWith('__') && typeof v === 'number' && v > 0)
-        .reduce((acc, [, v]) => acc + v, 0);
-      if (currentAttempt > 0) {
-        applyAdaptiveTemperature(body, currentAttempt, { isRepair: true });
-      }
-    } catch {}
 
     // Build headers — use provider-aware key routing from config.js
     const headers = buildAuthHeaders(requestConfig);
@@ -2395,6 +2875,13 @@ async function chatCompletion(config, messages) {
     } catch (fetchErr) {
       clearTimeout(timeout);
       _stopSpinner();
+      if (hasImages) {
+        return {
+          error: "Vision input is not supported by the active model endpoint",
+          imagePath: firstImagePath,
+          hint: `Network/API connection failed: ${fetchErr.message}`
+        };
+      }
       // Distinguish timeout from unreachable endpoint — show both in TUI and console
       if (fetchErr.name === 'AbortError' || fetchErr.message?.includes('abort')) {
         const msg = `Model timed out after ${timeoutSecs}s. The model is still processing or the endpoint is unresponsive.\n  Tip: increase timeout with SMALLCODE_MODEL_TIMEOUT=600 in your .env`;
@@ -2445,6 +2932,13 @@ async function chatCompletion(config, messages) {
       if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `HTTP ${response.status}: ${errDetail.slice(0, 80)}`);
       // MarrowScript Rank 8: record failure for adaptive routing
       try { const { getAdaptiveRouter } = require('../src/model/adaptive_router'); getAdaptiveRouter().recordCall(body.model || config.model.name, false); } catch {}
+      if (hasImages) {
+        return {
+          error: "Vision input is not supported by the active model endpoint",
+          imagePath: firstImagePath,
+          hint: `The endpoint rejected the image payload. Status: ${response.status}. Error: ${errDetail}`
+        };
+      }
       return null;
     }
 
@@ -2495,6 +2989,13 @@ async function chatCompletion(config, messages) {
       message: err.message,
       stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
     });
+    if (hasImages) {
+      return {
+        error: "Vision input is not supported by the active model endpoint",
+        imagePath: firstImagePath,
+        hint: `Network/API connection failed: ${err.message}`
+      };
+    }
     return null;
   }
 }
@@ -2895,7 +3396,15 @@ async function handleMCPToolCall(id, params) {
       break;
     }
     case 'smallcode_memory_load': {
-      const objects = memoryStore.loadForTask(args.task || '', 2000);
+      if (currentTaskType) {
+        const { authorizeToolForAgent } = require('../src/governor/agent_registry');
+        const auth = authorizeToolForAgent(name, currentTaskType);
+        if (auth.authorized === false) {
+          result = auth.reason;
+          break;
+        }
+      }
+      const objects = memoryStore.loadForTask(args.task || '', 2000, { taskType: currentTaskType, runId: currentLedgerRunId });
       // Handle both array return (MemoryStore in memory.js) and {objects} return
       const items = Array.isArray(objects) ? objects : (objects?.objects || []);
       result = items.length > 0
@@ -2904,8 +3413,22 @@ async function handleMCPToolCall(id, params) {
       break;
     }
     case 'smallcode_memory_remember': {
+      if (currentTaskType) {
+        const { authorizeToolForAgent } = require('../src/governor/agent_registry');
+        const auth = authorizeToolForAgent(name, currentTaskType);
+        if (auth.authorized === false) {
+          result = auth.reason;
+          break;
+        }
+      }
       const obj = memoryStore.remember(args.type || 'context', args.title || '', args.content || '', { tags: args.tags || [] });
-      result = `Remembered: [${obj.type}] ${obj.title} (${obj.id})`;
+      if (obj.duplicate) {
+        result = `Already known (confirmed existing: ${obj.existing_id})`;
+      } else if (obj.rejected) {
+        result = `Rejected: ${obj.reason}`;
+      } else {
+        result = `Remembered: [${obj.type}] ${obj.title} (${obj.id})`;
+      }
       break;
     }
     default:
@@ -3042,6 +3565,17 @@ async function main() {
     journal = null;
   }
 
+  if (!flags.mcp) {
+    try {
+      const { getActiveWorkspace, getWorkspaceSummary } = require('../src/governor/project_workspace');
+      const activeId = getActiveWorkspace();
+      if (activeId) {
+        const summary = getWorkspaceSummary(activeId);
+        console.log(`  ⚡ Active workspace: ${activeId} (${summary.rootPath || 'No rootPath set'})`);
+      }
+    } catch (e) {}
+  }
+
   if (flags.mcp) {
     runMCP();
     return;
@@ -3095,13 +3629,20 @@ async function main() {
   await runTUI(config);
 }
 
-main().catch(err => {
-  console.error(`Fatal: ${err.message}`);
-  logEvent(EVENT_TYPES.ERROR, {
-    phase: 'main',
-    message: err.message,
-    stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+if (require.main === module) {
+  main().catch(err => {
+    console.error(`Fatal: ${err.message}`);
+    logEvent(EVENT_TYPES.ERROR, {
+      phase: 'main',
+      message: err.message,
+      stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+    });
+    logEvent(EVENT_TYPES.SESSION_END, { reason: 'fatal_error', mode: 'cli' });
+    process.exit(1);
   });
-  logEvent(EVENT_TYPES.SESSION_END, { reason: 'fatal_error', mode: 'cli' });
-  process.exit(1);
-});
+}
+
+module.exports = {
+  buildChatRequestBody,
+  getAllTools,
+};

@@ -76,9 +76,41 @@ function showMiniDiff(tui, filePath, oldStr, newStr, lineNum) {
 }
 
 async function executeTool(name, args, ctx) {
-  const { _fullscreenRef, mcpCall, memoryStore, pluginLoader, mcpClient, flags, config, tui } = ctx;
+  const { _fullscreenRef, mcpCall, memoryStore, pluginLoader, mcpClient, flags, config, tui } = ctx || {};
   const { execSync } = require('child_process');
   const cwd = process.cwd();
+
+  // Agent Registry Tool Permission Enforcement (Milestone 5)
+  if (ctx && (ctx.activeAgent || ctx.currentTaskType)) {
+    try {
+      const { authorizeToolForAgent, getActiveAgentContext } = require('../src/governor/agent_registry');
+      const authResult = authorizeToolForAgent(name, ctx.activeAgent || ctx.currentTaskType);
+
+      // Milestone 6A: Record authorization event in run ledger
+      try {
+        const { getLedger } = require('../src/governor/run_ledger');
+        const agentCtx = ctx.activeAgent || (ctx.currentTaskType ? getActiveAgentContext(ctx.currentTaskType) : null);
+        getLedger().recordAuthorization({
+          runId: ctx._ledgerRunId || null,
+          toolName: name,
+          taskType: ctx.currentTaskType || (ctx.activeAgent ? ctx.activeAgent.agentId : null),
+          agentId: agentCtx?.agentId || null,
+          mode: process.env.SMALLCODE_ENFORCEMENT_MODE || 'warn',
+          authorized: authResult.authorized !== false,
+          reason: authResult.reason || authResult.warning || null,
+        });
+      } catch (e) { /* ledger errors are contained */ }
+
+      if (authResult.authorized === false) {
+        return { error: authResult.reason };
+      }
+      if (authResult.warning) {
+        console.warn(authResult.warning);
+      }
+    } catch (e) {
+      // Contain enforcement errors
+    }
+  }
 
   // Sanitize all string args — strip ANSI escape sequences the model may have
   // hallucinated into command strings (e.g. color codes in bash arguments).
@@ -91,7 +123,454 @@ async function executeTool(name, args, ctx) {
     }
   }
 
+  const toolStart = Date.now();
+  let result;
+  try {
+    result = await _executeToolInner(name, args, ctx);
+  } catch (e) {
+    result = { error: e.message || String(e) };
+  }
+
+  // Record tool call in ledger
+  if (ctx && ctx._ledgerRunId) {
+    try {
+      const { getLedger } = require('../src/governor/run_ledger');
+      const durationMs = Date.now() - toolStart;
+      const resultSummary = result.error
+        ? `error: ${result.error}`
+        : result.result
+          ? String(result.result).slice(0, 500)
+          : (result.action ? `${result.action} ${result.path || ''}` : 'success');
+
+      getLedger().recordToolCall({
+        runId: ctx._ledgerRunId,
+        toolName: name,
+        args: args,
+        resultSummary,
+        success: !result.error,
+        durationMs,
+      });
+    } catch (e) {
+      // Degrade silently
+    }
+  }
+
+  return result;
+}
+
+async function _executeToolInner(name, args, ctx) {
+  const { _fullscreenRef, mcpCall, memoryStore, pluginLoader, mcpClient, flags, config, tui } = ctx || {};
+  
+  const { getActiveWorkspace, getActiveTargetRoot } = require('../src/governor/project_workspace');
+  const activeWorkspaceId = getActiveWorkspace();
+  let cwd = process.cwd();
+
+  const writeTools = new Set(['write_file', 'append_file', 'patch', 'read_and_patch', 'create_and_run', 'bone_compile']);
+  const readTools = new Set(['read_file', 'find_files', 'search', 'find_and_read', 'search_and_read', 'bone_check']);
+
+  if (activeWorkspaceId) {
+    const targetRoot = getActiveTargetRoot();
+    if (targetRoot.ok) {
+      cwd = targetRoot.rootPath;
+    } else {
+      if (writeTools.has(name)) {
+        return { error: 'Active workspace has no target project root set. Set rootPath before writing project files.' };
+      }
+      if (readTools.has(name)) {
+        return { error: 'Active workspace has no target project root set. Set rootPath before reading project files.' };
+      }
+    }
+  }
+
+  // Reject directory traversal patterns for file/pattern tools
+  if (args && typeof args === 'object') {
+    for (const key of ['path', 'pattern']) {
+      if (typeof args[key] === 'string' && (args[key].includes('..') || args[key].includes('..\\') || args[key].includes('../'))) {
+        return { error: `${name} rejected: ${key} contains directory traversal sequence: "${args[key]}"` };
+      }
+    }
+  }
+
   switch (name) {
+    case 'vision_screenshot': {
+      try {
+        const { saveScreenshot } = require('../src/vision/image_artifact_store');
+        const metadata = saveScreenshot();
+        return {
+          action: 'Captured',
+          imageId: metadata.imageId,
+          filePath: metadata.filePath,
+          width: metadata.width,
+          height: metadata.height,
+          byteSize: metadata.byteSize,
+          result: `Screenshot captured: ${metadata.filePath} (${metadata.width}x${metadata.height})`
+        };
+      } catch (err) {
+        return { error: `Failed to capture screenshot: ${err.message}` };
+      }
+    }
+
+    case 'vision_list': {
+      try {
+        const { listImages } = require('../src/vision/image_artifact_store');
+        const images = listImages();
+        return {
+          result: JSON.stringify(images, null, 2)
+        };
+      } catch (err) {
+        return { error: `Failed to list screenshots: ${err.message}` };
+      }
+    }
+
+    case 'vision_describe': {
+      try {
+        const { saveScreenshot } = require('../src/vision/image_artifact_store');
+        const { queryVisionModel } = require('../src/vision/vision_payload_builder');
+        
+        let imagePath = args.image_path;
+        if (!imagePath) {
+          const metadata = saveScreenshot();
+          imagePath = metadata.filePath;
+        }
+
+        const queryResult = await queryVisionModel({
+          text: "Describe this image in detail.",
+          imagePath,
+          config
+        });
+
+        if (queryResult.error) {
+          return {
+            error: queryResult.error,
+            imagePath,
+            hint: queryResult.hint
+          };
+        }
+
+        return {
+          result: queryResult.text,
+          imagePath
+        };
+      } catch (err) {
+        return { error: `Vision describe failed: ${err.message}` };
+      }
+    }
+
+    case 'vision_ask': {
+      try {
+        const { saveScreenshot } = require('../src/vision/image_artifact_store');
+        const { queryVisionModel } = require('../src/vision/vision_payload_builder');
+        
+        let imagePath = args.image_path;
+        if (!imagePath) {
+          const metadata = saveScreenshot();
+          imagePath = metadata.filePath;
+        }
+
+        const queryResult = await queryVisionModel({
+          text: args.question,
+          imagePath,
+          config
+        });
+
+        if (queryResult.error) {
+          return {
+            error: queryResult.error,
+            imagePath,
+            hint: queryResult.hint
+          };
+        }
+
+        return {
+          result: queryResult.text,
+          imagePath
+        };
+      } catch (err) {
+        return { error: `Vision ask failed: ${err.message}` };
+      }
+    }
+
+    case 'workspace_create': {
+      try {
+        const { setActiveWorkspace, getWorkspaceSummary, normalizeProjectId, listWorkspaces } = require('../src/governor/project_workspace');
+        const normId = normalizeProjectId(args.projectId);
+
+        const canonical = (id) => id.toLowerCase().replace(/[-_]/g, '');
+        const normCanonical = canonical(normId);
+
+        const existing = listWorkspaces();
+        const duplicate = existing.find(w => canonical(w.projectId) === normCanonical);
+
+        if (duplicate) {
+          if (duplicate.projectId === normId) {
+            return { error: `Workspace "${normId}" already exists. Use workspace_set_active to make it active instead of creating a duplicate.` };
+          } else {
+            return { error: `Workspace with a similar name already exists: "${duplicate.projectId}". Use workspace_set_active to use it instead of creating a duplicate.` };
+          }
+        }
+
+        const activeId = setActiveWorkspace(normId, {
+          name: args.name,
+          description: args.description,
+          goal: args.goal,
+          constraints: args.constraints,
+          rootPath: args.rootPath,  // optional: absolute path to target project root
+        });
+        const summary = getWorkspaceSummary(activeId);
+        if (ctx && ctx._ledgerRunId) {
+          const { linkRunToWorkspace } = require('../src/governor/project_workspace');
+          let runMeta = {};
+          try {
+            const { getLedger } = require('../src/governor/run_ledger');
+            const runData = getLedger().getRun(ctx._ledgerRunId);
+            if (runData) {
+              runMeta = {
+                createdAt: runData.started_at,
+                taskType: runData.task_type,
+                activeAgentId: runData.agent_id,
+                modelPreset: runData.model_preset,
+                promptPreview: runData.prompt
+              };
+            }
+          } catch (e) {}
+          linkRunToWorkspace(normId, ctx._ledgerRunId, runMeta);
+        }
+        return {
+          action: 'Created and activated workspace',
+          projectId: normId,
+          result: `Workspace "${normId}" created successfully and set as active.\n\nSummary:\n${JSON.stringify(summary, null, 2)}`
+        };
+      } catch (err) {
+        return { error: `Failed to create workspace: ${err.message}` };
+      }
+    }
+
+    case 'workspace_list': {
+      try {
+        const { listWorkspaces } = require('../src/governor/project_workspace');
+        const list = listWorkspaces();
+        return {
+          result: JSON.stringify(list, null, 2)
+        };
+      } catch (err) {
+        return { error: `Failed to list workspaces: ${err.message}` };
+      }
+    }
+
+    case 'workspace_set_active': {
+      try {
+        const { setActiveWorkspace, getWorkspaceSummary } = require('../src/governor/project_workspace');
+        const normId = setActiveWorkspace(args.projectId);
+        const summary = getWorkspaceSummary(normId);
+        if (ctx && ctx._ledgerRunId) {
+          const { linkRunToWorkspace } = require('../src/governor/project_workspace');
+          let runMeta = {};
+          try {
+            const { getLedger } = require('../src/governor/run_ledger');
+            const runData = getLedger().getRun(ctx._ledgerRunId);
+            if (runData) {
+              runMeta = {
+                createdAt: runData.started_at,
+                taskType: runData.task_type,
+                activeAgentId: runData.agent_id,
+                modelPreset: runData.model_preset,
+                promptPreview: runData.prompt
+              };
+            }
+          } catch (e) {}
+          linkRunToWorkspace(normId, ctx._ledgerRunId, runMeta);
+        }
+        return {
+          action: 'Set active workspace',
+          projectId: normId,
+          result: `Workspace "${normId}" is now active.\n\nSummary:\n${JSON.stringify(summary, null, 2)}`
+        };
+      } catch (err) {
+        return { error: `Failed to set active workspace: ${err.message}` };
+      }
+    }
+
+    case 'workspace_status': {
+      try {
+        const { getActiveWorkspace, getWorkspaceSummary, diagnoseWorkspaceState } = require('../src/governor/project_workspace');
+        const activeId = getActiveWorkspace();
+        if (!activeId) {
+          const diagnostics = diagnoseWorkspaceState();
+          let message = 'No active project workspace is set. Call workspace_create or workspace_set_active first.';
+          if (diagnostics.availableWorkspaceIds.length > 0) {
+            message += `\n\nAvailable workspaces: ${diagnostics.availableWorkspaceIds.join(', ')}. Use workspace_set_active with one of these project IDs to restore state, or create a new workspace.`;
+          }
+          message += `\n\nDiagnostics:\n${JSON.stringify(diagnostics, null, 2)}`;
+          return {
+            result: message,
+            diagnostics
+          };
+        }
+        const summary = getWorkspaceSummary(activeId);
+        return {
+          result: JSON.stringify(summary, null, 2)
+        };
+      } catch (err) {
+        return { error: `Failed to get workspace status: ${err.message}` };
+      }
+    }
+
+    case 'workspace_add_task': {
+      try {
+        const { getActiveWorkspace, writeWorkspaceArtifact } = require('../src/governor/project_workspace');
+        const activeId = getActiveWorkspace();
+        if (!activeId) {
+          return { error: 'No active workspace. Please set an active workspace first.' };
+        }
+        const safeTitle = args.title.trim().toLowerCase()
+          .replace(/\s+/g, '-')
+          .replace(/[^a-z0-9\-]/g, '');
+        const filename = `${safeTitle || 'task'}.md`;
+        const fullPath = writeWorkspaceArtifact(activeId, 'tasks', filename, args.content);
+        return {
+          action: 'Added task',
+          path: filename,
+          result: `Task added successfully to active workspace "${activeId}".\nSaved to tasks/${filename} (Absolute: ${fullPath})`
+        };
+      } catch (err) {
+        return { error: `Failed to add task: ${err.message}` };
+      }
+    }
+
+    case 'workspace_add_plan': {
+      try {
+        const { getActiveWorkspace, writeWorkspaceArtifact } = require('../src/governor/project_workspace');
+        const activeId = getActiveWorkspace();
+        if (!activeId) {
+          return { error: 'No active workspace. Please set an active workspace first.' };
+        }
+        const safeTitle = args.title.trim().toLowerCase()
+          .replace(/\s+/g, '-')
+          .replace(/[^a-z0-9\-]/g, '');
+        const filename = `${safeTitle || 'plan'}.md`;
+        const fullPath = writeWorkspaceArtifact(activeId, 'plans', filename, args.content);
+        return {
+          action: 'Added plan',
+          path: filename,
+          result: `Plan added successfully to active workspace "${activeId}".\nSaved to plans/${filename} (Absolute: ${fullPath})`
+        };
+      } catch (err) {
+        return { error: `Failed to add plan: ${err.message}` };
+      }
+    }
+
+    case 'workspace_add_artifact': {
+      try {
+        const { getActiveWorkspace, writeWorkspaceArtifact } = require('../src/governor/project_workspace');
+        const activeId = getActiveWorkspace();
+        if (!activeId) {
+          return { error: 'No active workspace. Please set an active workspace first.' };
+        }
+        if (args.name.includes('/') || args.name.includes('\\') || args.name.includes('..')) {
+          return { error: 'Artifact name must not contain directory separators or traversal sequences.' };
+        }
+        const fullPath = writeWorkspaceArtifact(activeId, 'artifacts', args.name, args.content);
+        return {
+          action: 'Added artifact',
+          path: args.name,
+          result: `Artifact "${args.name}" added successfully to active workspace "${activeId}".\nSaved to artifacts/${args.name} (Absolute: ${fullPath})`
+        };
+      } catch (err) {
+        return { error: `Failed to add artifact: ${err.message}` };
+      }
+    }
+
+    case 'workspace_link_run': {
+      try {
+        const { getActiveWorkspace, linkRunToWorkspace } = require('../src/governor/project_workspace');
+        const activeId = getActiveWorkspace();
+        if (!activeId) {
+          return { error: 'No active workspace. Please set an active workspace first.' };
+        }
+        let runMeta = {};
+        try {
+          const { getLedger } = require('../src/governor/run_ledger');
+          const runData = getLedger().getRun(args.runId);
+          if (runData) {
+            runMeta = {
+              createdAt: runData.started_at,
+              taskType: runData.task_type,
+              activeAgentId: runData.agent_id,
+              modelPreset: runData.model_preset,
+              promptPreview: runData.prompt
+            };
+          }
+        } catch (e) {}
+        linkRunToWorkspace(activeId, args.runId, runMeta);
+        return {
+          action: 'Linked run',
+          result: `Run "${args.runId}" linked successfully to active workspace "${activeId}".`
+        };
+      } catch (err) {
+        return { error: `Failed to link run: ${err.message}` };
+      }
+    }
+
+    case 'workspace_set_root': {
+      try {
+        const { getActiveWorkspace, ensureWorkspace, getWorkspaceSummary, validateTargetRoot } = require('../src/governor/project_workspace');
+        const activeId = getActiveWorkspace();
+        if (!activeId) {
+          return { error: 'No active workspace. Please set an active workspace first.' };
+        }
+        
+        let targetPath = args.rootPath;
+        if (typeof targetPath !== 'string' || !targetPath.trim()) {
+          return { error: 'rootPath must be a non-empty string.' };
+        }
+        
+        if (targetPath.includes('..')) {
+          return { error: `rootPath contains directory traversal sequence: "${targetPath}".` };
+        }
+        
+        if (!path.isAbsolute(targetPath)) {
+          return { error: `rootPath must be an absolute path. Got: "${targetPath}".` };
+        }
+        
+        const resolvedPath = path.resolve(targetPath);
+        
+        const createIfMissing = !!args.createIfMissing;
+        if (!fs.existsSync(resolvedPath)) {
+          if (createIfMissing) {
+            fs.mkdirSync(resolvedPath, { recursive: true });
+          } else {
+            return { error: `rootPath does not exist on disk: "${resolvedPath}". Set createIfMissing to true to create it.` };
+          }
+        }
+        
+        validateTargetRoot(resolvedPath, { mustExist: true });
+        
+        ensureWorkspace(activeId, { rootPath: resolvedPath });
+        
+        const summary = getWorkspaceSummary(activeId);
+        return {
+          action: 'Set workspace root',
+          projectId: activeId,
+          rootPath: resolvedPath,
+          result: `Workspace "${activeId}" target root path successfully updated to: ${resolvedPath}.\n\nWorkspace Summary:\n${JSON.stringify(summary, null, 2)}`
+        };
+      } catch (err) {
+        return { error: `Failed to set workspace root: ${err.message}` };
+      }
+    }
+
+    case 'workspace_diagnose': {
+      try {
+        const { diagnoseWorkspaceState } = require('../src/governor/project_workspace');
+        const diagnostics = diagnoseWorkspaceState();
+        return {
+          result: JSON.stringify(diagnostics, null, 2)
+        };
+      } catch (err) {
+        return { error: `Failed to run workspace diagnostics: ${err.message}` };
+      }
+    }
+
     case 'read_file': {
       const safe = safeResolvePath(args.path, cwd);
       if (!safe.ok) return { error: `read_file rejected: ${safe.reason}` };
@@ -681,7 +1160,7 @@ async function executeTool(name, args, ctx) {
         const maxTokens = args.max_tokens || 2000;
         // Handle both budget-aware-mcp format ({objects, tokens_used}) and
         // fallback MemoryStore format (plain array).
-        const raw = memoryStore.loadForTask(task, maxTokens);
+        const raw = memoryStore.loadForTask(task, maxTokens, { taskType: ctx.currentTaskType, runId: ctx._ledgerRunId });
         const objects = Array.isArray(raw) ? raw : (raw?.objects || []);
         const tokens_used = Array.isArray(raw) ? objects.length * 50 : (raw?.tokens_used || 0);
         if (objects.length === 0) return { result: 'No relevant memory found.' };
@@ -699,6 +1178,7 @@ async function executeTool(name, args, ctx) {
           obj = memoryStore.remember({ type: args.type || 'context', title: args.title || '', content: args.content || '', tags: args.tags || [], symbols: args.symbols || [], files: args.files || [] });
         }
         if (obj.duplicate) return { result: `Already known (confirmed existing: ${obj.existing_id})` };
+        if (obj.rejected) return { result: `Rejected: ${obj.reason}` };
         return { result: `Remembered [${obj.type}] "${obj.title}" (${obj.id})` };
       }
       if (name === 'memory_list') {

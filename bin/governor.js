@@ -231,6 +231,16 @@ Error that won't go away: ${errors[0] || 'unknown'}`,
 // Used as default for fast tasks and as fallback for the LLM-based one.
 function classifyTask(userMessage) {
   const msg = userMessage.toLowerCase();
+
+  // Route project workspace management requests to Conductor (multi_step)
+  if (msg.includes('workspace') && (
+    msg.includes('create') || msg.includes('set') || msg.includes('active') ||
+    msg.includes('list') || msg.includes('status') || msg.includes('add') ||
+    msg.includes('goal') || msg.includes('constraint')
+  )) {
+    return 'multi_step';
+  }
+
   // Detect backend/API tasks that should use BoneScript — ONLY for Node.js/TypeScript backends
   // If user mentions Python/Django/FastAPI/Go/Rust/etc, do NOT trigger BoneScript
   const nonNodeBackend = msg.match(/\b(python|django|fastapi|flask|go|golang|rust|actix|axum|ruby|rails|php|laravel|java|spring|c#|dotnet|asp\.net|elixir|phoenix)\b/);

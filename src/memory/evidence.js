@@ -169,12 +169,18 @@ function recordEvidence(memoryStore, trace, options = {}) {
     // We try the object form first; on TypeError fall back to positional.
     let result;
     try {
-      result = memoryStore.remember(summary);
+      result = memoryStore.remember({
+        ...summary,
+        isAutomatic: true,
+        taskType: options.taskType,
+      });
     } catch (e) {
       // Positional fallback
       result = memoryStore.remember(summary.type, summary.title, summary.content, {
         tags: summary.tags,
         files: summary.files,
+        isAutomatic: true,
+        taskType: options.taskType,
       });
     }
     return result;

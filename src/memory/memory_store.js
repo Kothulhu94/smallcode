@@ -111,6 +111,14 @@ class MemoryStore {
       this.useFts = false;
       // FTS5 is not compiled, degrading to LIKE fallback
     }
+
+    // Slice 2D migration: add title column to existing DBs.
+    // SQLite does not support ADD COLUMN IF NOT EXISTS, so we inspect
+    // PRAGMA table_info and only run ALTER TABLE when the column is missing.
+    const existingCols = this.db.pragma('table_info(memories)').map(c => c.name);
+    if (!existingCols.includes('title')) {
+      this.db.prepare('ALTER TABLE memories ADD COLUMN title TEXT').run();
+    }
   }
 
   /**
@@ -134,7 +142,7 @@ class MemoryStore {
    * @param {number} [args.ttlDays] - Custom expiry in days overrides default config
    * @returns {string} The created memory ID
    */
-  saveMemory({ category, text, keywords, source, ttlDays }) {
+  saveMemory({ id, category, title, text, keywords, source, ttlDays }) {
     if (!this.db) throw new Error('Database is not initialized. Call init() first.');
 
     // Validate category
@@ -147,7 +155,7 @@ class MemoryStore {
       throw new Error('Memory text must be a non-empty string.');
     }
 
-    const id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    const finalId = id || (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'));
     const now = this.config.now();
 
     // Format keywords
@@ -162,11 +170,17 @@ class MemoryStore {
     const days = typeof ttlDays === 'number' ? ttlDays : this.config.ttlDays;
     const expiresAt = days > 0 ? now + (days * 24 * 60 * 60 * 1000) : null;
 
+    // Title: store the caller-supplied title when non-blank; otherwise derive
+    // a safe fallback from the first line of text so the column is never NULL.
+    const storedTitle = (title && typeof title === 'string' && title.trim())
+      ? title.trim()
+      : text.trim().split('\n')[0].slice(0, 80);
+
     // Insert main
     this.db.prepare(`
-      INSERT INTO memories (id, category, text, keywords, source, created_at, last_used, use_count, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
-    `).run(id, category, text.trim(), kwStr, source || null, now, now, expiresAt);
+      INSERT INTO memories (id, category, title, text, keywords, source, created_at, last_used, use_count, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+    `).run(finalId, category, storedTitle, text.trim(), kwStr, source || null, now, now, expiresAt);
 
     // Insert FTS
     if (this.useFts) {
@@ -174,13 +188,13 @@ class MemoryStore {
         this.db.prepare(`
           INSERT INTO memories_fts (memory_id, text, keywords)
           VALUES (?, ?, ?)
-        `).run(id, text.trim(), kwStr);
+        `).run(finalId, text.trim(), kwStr);
       } catch (e) {
         // Fallback silently if FTS table write fails
       }
     }
 
-    return id;
+    return finalId;
   }
 
   /**

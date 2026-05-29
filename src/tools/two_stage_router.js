@@ -28,8 +28,8 @@ const TOOL_CATEGORIES = {
     tools: ['bash', 'run'],
   },
   plan: {
-    description: 'Load/save project memory, BoneScript compile/check',
-    tools: ['memory_load', 'memory_remember', 'bone_compile', 'bone_check'],
+    description: 'Load/save project memory, BoneScript compile/check, workspace actions',
+    tools: ['memory_load', 'memory_remember', 'bone_compile', 'bone_check', 'workspace_create', 'workspace_list', 'workspace_set_active', 'workspace_status', 'workspace_add_task', 'workspace_add_plan', 'workspace_add_artifact', 'workspace_link_run', 'workspace_set_root'],
   },
 };
 

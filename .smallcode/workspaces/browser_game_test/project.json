@@ -1,0 +1,14 @@
+{
+  "projectId": "browser_game_test",
+  "name": "Browser Game Test",
+  "description": "Workspace for testing a browser game.",
+  "createdAt": 1780032057965,
+  "updatedAt": 1780033566955,
+  "status": "active",
+  "rootPath": "D:\\BrowserGameTest",
+  "tags": [],
+  "activeGoal": "Develop and test a browser game.",
+  "constraints": [],
+  "lastRunId": "f2441c00-928",
+  "metadata": {}
+}

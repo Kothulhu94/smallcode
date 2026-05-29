@@ -1,0 +1,9 @@
+{
+  "runId": "f2441c00-928",
+  "createdAt": 1780033566944,
+  "taskType": "search",
+  "activeAgentId": "repo_navigator",
+  "modelPreset": "fast",
+  "promptPreview": "workspace list",
+  "dashboardUrl": "http://localhost:3000/run/f2441c00-928"
+}

@@ -31,6 +31,21 @@ const TOOLS = [
   { type: 'function', function: { name: 'contract_assert_pass', description: 'Mark a contract assertion as passed, with command-line evidence. Use the assertion id from contract_status (e.g. "a01"). evidence should be a short (<240 char) summary of what was run and what it returned.', parameters: { type: 'object', properties: { assertion_id: { type: 'string', description: 'Assertion id (e.g. a01)' }, evidence: { type: 'string', description: 'Short summary of command output proving the assertion holds' }, command: { type: 'string', description: 'The command run (optional)' }, exit_code: { type: 'integer', description: 'Exit code of the command (optional)' } }, required: ['assertion_id'] } } },
   { type: 'function', function: { name: 'contract_assert_fail', description: 'Mark a contract assertion as failed, with evidence. Used when a check ran and the result was wrong — not for skipping checks.', parameters: { type: 'object', properties: { assertion_id: { type: 'string', description: 'Assertion id (e.g. a01)' }, evidence: { type: 'string', description: 'Short summary of why the check failed' }, command: { type: 'string', description: 'The command run (optional)' }, exit_code: { type: 'integer', description: 'Exit code of the command (optional)' } }, required: ['assertion_id', 'evidence'] } } },
   { type: 'function', function: { name: 'contract_assert_skip', description: 'Mark an assertion as skipped (not applicable in current scope). Skipped assertions count as resolved for the done-guard.', parameters: { type: 'object', properties: { assertion_id: { type: 'string', description: 'Assertion id' }, reason: { type: 'string', description: 'Why this assertion is being skipped' } }, required: ['assertion_id', 'reason'] } } },
+  { type: 'function', function: { name: 'vision_screenshot', description: 'Captures the current screen and stores it as an image artifact.', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'vision_list', description: 'Lists recent image artifacts.', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'vision_describe', description: 'Captures or accepts an image path and asks the active vision-capable model to describe it.', parameters: { type: 'object', properties: { image_path: { type: 'string', description: 'Path to the image file to describe. If omitted, takes a new screenshot.' } }, required: [] } } },
+  { type: 'function', function: { name: 'vision_ask', description: 'Captures or accepts an image path plus a question and sends image+text to the model if supported.', parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question to ask about the image.' }, image_path: { type: 'string', description: 'Path to the image file. If omitted, takes a new screenshot.' } }, required: ['question'] } } },
+  // ─── Workspace tools ───────────────────────────────────────────────────────
+  { type: 'function', function: { name: 'workspace_create', description: 'Create a new project workspace and set it as active. Provide rootPath to associate a target project directory with this workspace (used by /files and file tools).', parameters: { type: 'object', properties: { projectId: { type: 'string', description: 'Raw project ID string (must not contain path traversal characters like "..", "/", "\\")' }, name: { type: 'string', description: 'Friendly project name (optional)' }, description: { type: 'string', description: 'Project description (optional)' }, goal: { type: 'string', description: 'Primary project goal (optional)' }, constraints: { type: 'array', items: { type: 'string' }, description: 'Project constraints (optional)' }, rootPath: { type: 'string', description: 'Absolute path to the target project directory on disk (optional). When set, /files and file commands operate on this directory instead of the harness root.' } }, required: ['projectId'] } } },
+  { type: 'function', function: { name: 'workspace_list', description: 'List all project workspaces and their manifests.', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'workspace_set_active', description: 'Set an existing project workspace as active.', parameters: { type: 'object', properties: { projectId: { type: 'string', description: 'Project ID' } }, required: ['projectId'] } } },
+  { type: 'function', function: { name: 'workspace_status', description: 'Get the summary and status of the active project workspace.', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'workspace_add_task', description: 'Add a new task document to the active project workspace.', parameters: { type: 'object', properties: { title: { type: 'string', description: 'Task title' }, content: { type: 'string', description: 'Task checklist/markdown content' } }, required: ['title', 'content'] } } },
+  { type: 'function', function: { name: 'workspace_add_plan', description: 'Add a design/implementation plan to the active project workspace.', parameters: { type: 'object', properties: { title: { type: 'string', description: 'Plan title' }, content: { type: 'string', description: 'Plan markdown content' } }, required: ['title', 'content'] } } },
+  { type: 'function', function: { name: 'workspace_add_artifact', description: 'Write a general text artifact to the active workspace.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'Artifact file name' }, content: { type: 'string', description: 'Artifact content' } }, required: ['name', 'content'] } } },
+  { type: 'function', function: { name: 'workspace_link_run', description: 'Link an existing ledger run ID to the active workspace.', parameters: { type: 'object', properties: { runId: { type: 'string', description: 'Ledger run ID to link' } }, required: ['runId'] } } },
+  { type: 'function', function: { name: 'workspace_set_root', description: 'Set or update the target project root directory path for the active workspace. Resolves /files and file tools relative to this path.', parameters: { type: 'object', properties: { rootPath: { type: 'string', description: 'Absolute path to the target project directory on disk' }, createIfMissing: { type: 'boolean', description: 'Create the directory if it does not exist (default: false)' } }, required: ['rootPath'] } } },
+  { type: 'function', function: { name: 'workspace_diagnose', description: 'Run diagnostics on current workspaces state: check active.txt, folder exists, similar/duplicate workspace names, and get recovery suggestions.', parameters: { type: 'object', properties: {}, required: [] } } }
 ];
 
 // ─── Provider Tools ─────────────────────────────────────────────────────────
@@ -106,4 +121,29 @@ function getAllTools(config, stage2Category, deps = {}) {
   return allTools;
 }
 
-module.exports = { TOOLS, COMPOUND_TOOLS, PROVIDER_TOOLS, getAllTools };
+// ─── Canonical Tool Schema Map ──────────────────────────────────────────────
+// Single source of truth: name → schema object.
+// Use this to check if a tool has a schema, or to get the schema for a tool.
+// Built once at load time — O(1) lookup for filter/validation code.
+const ALL_STATIC_TOOLS = [...TOOLS, ...COMPOUND_TOOLS, ...PROVIDER_TOOLS];
+const TOOL_SCHEMAS_BY_NAME = new Map(
+  ALL_STATIC_TOOLS.map(t => [t.function.name, t])
+);
+
+/**
+ * Return an array of tool schemas filtered to only the provided tool names.
+ * If allowedTools is null/undefined, returns all static schemas.
+ * Dynamic tools (plugin/MCP) are not included — callers must merge separately.
+ * @param {string[]|null} allowedTools
+ * @returns {object[]}
+ */
+function getToolSchemas(allowedTools) {
+  if (!allowedTools || !Array.isArray(allowedTools)) {
+    return ALL_STATIC_TOOLS;
+  }
+  return allowedTools
+    .map(name => TOOL_SCHEMAS_BY_NAME.get(name))
+    .filter(Boolean);
+}
+
+module.exports = { TOOLS, COMPOUND_TOOLS, PROVIDER_TOOLS, ALL_STATIC_TOOLS, TOOL_SCHEMAS_BY_NAME, getToolSchemas, getAllTools };

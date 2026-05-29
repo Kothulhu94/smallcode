@@ -82,6 +82,21 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         return;
       }
 
+      case '/dashboard': {
+        const { startDashboardServer } = require('../src/governor/dashboard_server');
+        const requestedPort = parts[1] ? parseInt(parts[1], 10) : 3000;
+        const port = isNaN(requestedPort) ? 3000 : requestedPort;
+        try {
+          startDashboardServer(port);
+          console.log(`  ${chalk.green('✓')} Observability Dashboard running at: ${chalk.cyan('http://localhost:' + port)}`);
+        } catch (e) {
+          console.log(`  ${chalk.red('✗')} Failed to start dashboard server: ${e.message}`);
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
       case '/stats':
         console.log(`  Model:    ${chalk.cyan(config.model.name)}`);
         console.log(`  Endpoint: ${chalk.gray(config.model.baseUrl)}`);
@@ -645,18 +660,54 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
       }
 
       case '/files': {
+        const { getActiveTargetRoot } = require('../src/governor/project_workspace');
+        const targetRoot = getActiveTargetRoot();
+
+        let listDir = null;
+        let label = '';
+
+        if (!targetRoot.ok) {
+          if (targetRoot.reason === 'no_active_workspace') {
+            // No workspace active — fall back to harness root with a clear label
+            listDir = process.cwd();
+            label = chalk.yellow('  [No active workspace — showing harness root files]');
+          } else if (targetRoot.reason === 'no_root_path') {
+            console.log(chalk.yellow('  Active workspace has no target project root set.'));
+            console.log(chalk.gray('  Use workspace_create with a rootPath argument, or set one via the model.'));
+            console.log('');
+            rl.prompt();
+            return;
+          } else {
+            // invalid_root_path
+            console.log(chalk.red(`  Active workspace rootPath is invalid: ${targetRoot.detail || 'unknown error'}`));
+            console.log(chalk.gray('  Update the workspace rootPath to a valid absolute directory.'));
+            console.log('');
+            rl.prompt();
+            return;
+          }
+        } else {
+          listDir = targetRoot.rootPath;
+          label = chalk.green(`  [Workspace project root: ${listDir}]`);
+        }
+
+        console.log(label);
         const { execSync } = require('child_process');
         try {
-          const output = execSync('git ls-files', { encoding: 'utf-8', cwd: process.cwd() });
-          const files = output.trim().split('\n');
+          const output = execSync('git ls-files', { encoding: 'utf-8', cwd: listDir });
+          const files = output.trim().split('\n').filter(Boolean);
           console.log(chalk.bold(`  Project files (${files.length}):`));
           for (const f of files.slice(0, 30)) {
             console.log(chalk.gray(`    ${f}`));
           }
           if (files.length > 30) console.log(chalk.gray(`    ... (${files.length - 30} more)`));
         } catch {
-          const entries = fs.readdirSync(process.cwd()).slice(0, 20);
-          for (const e of entries) console.log(chalk.gray(`    ${e}`));
+          try {
+            const entries = fs.readdirSync(listDir).slice(0, 20);
+            console.log(chalk.bold(`  Directory listing (not a git repo):`));
+            for (const e of entries) console.log(chalk.gray(`    ${e}`));
+          } catch (readErr) {
+            console.log(chalk.red(`  Cannot list files: ${readErr.message}`));
+          }
         }
         console.log('');
         rl.prompt();
