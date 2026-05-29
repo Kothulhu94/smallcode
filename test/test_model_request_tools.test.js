@@ -19,6 +19,42 @@ const { buildChatRequestBody, getAllTools } = require('../bin/smallcode');
 const { getAgent } = require('../src/governor/agent_registry');
 const { providerRegistry } = require('../src/compiled/providers/registry');
 
+function createTestContext(testWsId) {
+  const { getWorkspaceRoot } = require('../src/governor/project_workspace');
+  const wsRoot = getWorkspaceRoot();
+  const activeTxtPath = path.join(wsRoot, 'active.txt');
+  
+  let originalActiveVal = null;
+  if (fs.existsSync(activeTxtPath)) {
+    originalActiveVal = fs.readFileSync(activeTxtPath, 'utf-8').trim();
+  }
+
+  // Pre-clean folder
+  try {
+    const wsPath = path.join(wsRoot, testWsId);
+    if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
+  } catch {}
+
+  return {
+    cleanup: () => {
+      try {
+        if (originalActiveVal) {
+          fs.writeFileSync(activeTxtPath, originalActiveVal, 'utf-8');
+        } else {
+          if (fs.existsSync(activeTxtPath)) {
+            const currentActive = fs.readFileSync(activeTxtPath, 'utf-8').trim();
+            if (currentActive === testWsId) {
+              fs.unlinkSync(activeTxtPath);
+            }
+          }
+        }
+        const wsPath = path.join(wsRoot, testWsId);
+        if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
+      } catch {}
+    }
+  };
+}
+
 test('Model Request Tools - select_category survives agent filtering in two-stage mode', () => {
   // force two-stage routing mode by contextWindow <= 16384
   const config = {
@@ -198,22 +234,10 @@ test('Model Request Tools - workspace_set_root updates active workspace rootPath
     setActiveWorkspace,
     getActiveTargetRoot,
     ensureWorkspace,
-    getWorkspaceRoot,
   } = require('../src/governor/project_workspace');
-  const wsRoot = getWorkspaceRoot();
   const testWsId = 'ws-set-root-test';
   
-  // Helper to cleanup
-  const cleanup = () => {
-    try {
-      const activeTxt = path.join(wsRoot, 'active.txt');
-      if (fs.existsSync(activeTxt)) fs.unlinkSync(activeTxt);
-      const wsPath = path.join(wsRoot, testWsId);
-      if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
-    } catch {}
-  };
-
-  cleanup();
+  const ctx = createTestContext(testWsId);
   const os = require('os');
   const tempDir = path.join(os.tmpdir(), `ws_set_root_${Date.now()}`);
   fs.mkdirSync(tempDir, { recursive: true });
@@ -223,13 +247,13 @@ test('Model Request Tools - workspace_set_root updates active workspace rootPath
     setActiveWorkspace(testWsId);
 
     const conductor = getAgent('conductor');
-    const ctx = { currentTaskType: 'multi_step', activeAgent: conductor, config: {} };
+    const executeCtx = { currentTaskType: 'multi_step', activeAgent: conductor, config: {} };
 
     // Set rootPath using workspace_set_root
     const result = await executeTool('workspace_set_root', {
       rootPath: tempDir,
       createIfMissing: true
-    }, ctx);
+    }, executeCtx);
 
     assert.ok(!result.error, `workspace_set_root failed: ${result.error}`);
     assert.equal(result.rootPath, path.resolve(tempDir));
@@ -238,7 +262,7 @@ test('Model Request Tools - workspace_set_root updates active workspace rootPath
     assert.equal(targetRoot.ok, true);
     assert.equal(targetRoot.rootPath, path.resolve(tempDir));
   } finally {
-    cleanup();
+    ctx.cleanup();
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   }
 });
@@ -249,42 +273,31 @@ test('Model Request Tools - workspace_set_root rejects unsafe paths', async () =
   const {
     setActiveWorkspace,
     ensureWorkspace,
-    getWorkspaceRoot,
   } = require('../src/governor/project_workspace');
   const testWsId = 'ws-unsafe-test';
-  const wsRoot = getWorkspaceRoot();
   
-  const cleanup = () => {
-    try {
-      const activeTxt = path.join(wsRoot, 'active.txt');
-      if (fs.existsSync(activeTxt)) fs.unlinkSync(activeTxt);
-      const wsPath = path.join(wsRoot, testWsId);
-      if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
-    } catch {}
-  };
-
-  cleanup();
+  const ctx = createTestContext(testWsId);
 
   try {
     ensureWorkspace(testWsId, { name: 'Unsafe Test' });
     setActiveWorkspace(testWsId);
 
     const conductor = getAgent('conductor');
-    const ctx = { currentTaskType: 'multi_step', activeAgent: conductor, config: {} };
+    const executeCtx = { currentTaskType: 'multi_step', activeAgent: conductor, config: {} };
 
     // Test case A: relative path
     const resultRel = await executeTool('workspace_set_root', {
       rootPath: './relative/path'
-    }, ctx);
+    }, executeCtx);
     assert.ok(resultRel.error, 'relative rootPath must be rejected');
 
     // Test case B: traversal path
     const resultTraversal = await executeTool('workspace_set_root', {
       rootPath: 'C:\\Windows\\..\\..\\evil'
-    }, ctx);
+    }, executeCtx);
     assert.ok(resultTraversal.error, 'traversal rootPath must be rejected');
   } finally {
-    cleanup();
+    ctx.cleanup();
   }
 });
 
@@ -294,25 +307,15 @@ test('Model Request Tools - write_file fails clearly when rootPath is missing', 
   const {
     setActiveWorkspace,
     ensureWorkspace,
-    getWorkspaceRoot,
     loadWorkspaceManifest,
     saveWorkspaceManifest,
   } = require('../src/governor/project_workspace');
   const testWsId = 'ws-missing-root';
-  const wsRoot = getWorkspaceRoot();
   
-  const cleanup = () => {
-    try {
-      const activeTxt = path.join(wsRoot, 'active.txt');
-      if (fs.existsSync(activeTxt)) fs.unlinkSync(activeTxt);
-      const wsPath = path.join(wsRoot, testWsId);
-      if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
-    } catch {}
-  };
-
-  cleanup();
+  const ctx = createTestContext(testWsId);
 
   try {
+    ensureWorkspace(testWsId, { name: 'Missing Root Test' });
     setActiveWorkspace(testWsId);
     // Manually force manifest rootPath to empty
     const manifest = loadWorkspaceManifest(testWsId);
@@ -320,17 +323,17 @@ test('Model Request Tools - write_file fails clearly when rootPath is missing', 
     saveWorkspaceManifest(testWsId, manifest);
 
     const codeEditor = getAgent('code_editor');
-    const ctx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
+    const executeCtx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
 
     const result = await executeTool('write_file', {
       path: 'test.txt',
       content: 'hello'
-    }, ctx);
+    }, executeCtx);
 
     assert.ok(result.error, 'write_file should fail when rootPath is missing');
     assert.match(result.error, /Active workspace has no target project root set. Set rootPath before writing project files/);
   } finally {
-    cleanup();
+    ctx.cleanup();
   }
 });
 
@@ -340,36 +343,25 @@ test('Model Request Tools - write_file with valid rootPath writes inside the tar
   const {
     setActiveWorkspace,
     ensureWorkspace,
-    getWorkspaceRoot,
   } = require('../src/governor/project_workspace');
   const testWsId = 'ws-valid-root-write';
-  const wsRoot = getWorkspaceRoot();
   const os = require('os');
   const tempDir = path.join(os.tmpdir(), `ws_valid_write_${Date.now()}`);
   fs.mkdirSync(tempDir, { recursive: true });
 
-  const cleanup = () => {
-    try {
-      const activeTxt = path.join(wsRoot, 'active.txt');
-      if (fs.existsSync(activeTxt)) fs.unlinkSync(activeTxt);
-      const wsPath = path.join(wsRoot, testWsId);
-      if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
-    } catch {}
-  };
-
-  cleanup();
+  const ctx = createTestContext(testWsId);
 
   try {
     ensureWorkspace(testWsId, { name: 'Valid Root Test', rootPath: tempDir });
     setActiveWorkspace(testWsId);
 
     const codeEditor = getAgent('code_editor');
-    const ctx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
+    const executeCtx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
 
     const result = await executeTool('write_file', {
       path: 'subdir/test.txt',
       content: 'inside target root'
-    }, ctx);
+    }, executeCtx);
 
     assert.ok(!result.error, `write_file failed: ${result.error}`);
     
@@ -377,7 +369,7 @@ test('Model Request Tools - write_file with valid rootPath writes inside the tar
     assert.ok(fs.existsSync(writtenPath), 'file must be written inside target root');
     assert.equal(fs.readFileSync(writtenPath, 'utf-8'), 'inside target root');
   } finally {
-    cleanup();
+    ctx.cleanup();
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   }
 });
@@ -388,37 +380,26 @@ test('Model Request Tools - write_file rejects traversal outside target root', a
   const {
     setActiveWorkspace,
     ensureWorkspace,
-    getWorkspaceRoot,
   } = require('../src/governor/project_workspace');
   const testWsId = 'ws-traversal-write';
-  const wsRoot = getWorkspaceRoot();
   const os = require('os');
   const tempDir = path.join(os.tmpdir(), `ws_traversal_write_${Date.now()}`);
   fs.mkdirSync(tempDir, { recursive: true });
 
-  const cleanup = () => {
-    try {
-      const activeTxt = path.join(wsRoot, 'active.txt');
-      if (fs.existsSync(activeTxt)) fs.unlinkSync(activeTxt);
-      const wsPath = path.join(wsRoot, testWsId);
-      if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
-    } catch {}
-  };
-
-  cleanup();
+  const ctx = createTestContext(testWsId);
 
   try {
     ensureWorkspace(testWsId, { name: 'Traversal Write Test', rootPath: tempDir });
     setActiveWorkspace(testWsId);
 
     const codeEditor = getAgent('code_editor');
-    const ctx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
+    const executeCtx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
 
     // Test A: path traversal using ..
     const resultTraversal = await executeTool('write_file', {
       path: '../evil.txt',
       content: 'traversal attempt'
-    }, ctx);
+    }, executeCtx);
     assert.ok(resultTraversal.error, 'write_file must reject traversal paths containing ..');
 
     // Test B: absolute path outside target root
@@ -426,10 +407,10 @@ test('Model Request Tools - write_file rejects traversal outside target root', a
     const resultOutside = await executeTool('write_file', {
       path: outsideAbs,
       content: 'outside attempt'
-    }, ctx);
+    }, executeCtx);
     assert.ok(resultOutside.error, 'write_file must reject absolute paths outside the target root');
   } finally {
-    cleanup();
+    ctx.cleanup();
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   }
 });
@@ -440,10 +421,8 @@ test('Model Request Tools - read_file uses target root for relative paths', asyn
   const {
     setActiveWorkspace,
     ensureWorkspace,
-    getWorkspaceRoot,
   } = require('../src/governor/project_workspace');
   const testWsId = 'ws-valid-root-read';
-  const wsRoot = getWorkspaceRoot();
   const os = require('os');
   const tempDir = path.join(os.tmpdir(), `ws_valid_read_${Date.now()}`);
   fs.mkdirSync(tempDir, { recursive: true });
@@ -452,32 +431,23 @@ test('Model Request Tools - read_file uses target root for relative paths', asyn
   fs.mkdirSync(path.join(tempDir, 'subdir'), { recursive: true });
   fs.writeFileSync(path.join(tempDir, 'subdir/test.txt'), 'read target root file');
 
-  const cleanup = () => {
-    try {
-      const activeTxt = path.join(wsRoot, 'active.txt');
-      if (fs.existsSync(activeTxt)) fs.unlinkSync(activeTxt);
-      const wsPath = path.join(wsRoot, testWsId);
-      if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
-    } catch {}
-  };
-
-  cleanup();
+  const ctx = createTestContext(testWsId);
 
   try {
     ensureWorkspace(testWsId, { name: 'Valid Read Test', rootPath: tempDir });
     setActiveWorkspace(testWsId);
 
     const codeEditor = getAgent('code_editor');
-    const ctx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
+    const executeCtx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
 
     const result = await executeTool('read_file', {
       path: 'subdir/test.txt'
-    }, ctx);
+    }, executeCtx);
 
     assert.ok(!result.error, `read_file failed: ${result.error}`);
     assert.match(result.result, /read target root file/);
   } finally {
-    cleanup();
+    ctx.cleanup();
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   }
 });
@@ -487,10 +457,8 @@ test('Model Request Tools - /files command shows files in workspace when rootPat
   const {
     setActiveWorkspace,
     ensureWorkspace,
-    getWorkspaceRoot,
   } = require('../src/governor/project_workspace');
   const testWsId = 'ws-files-command-active';
-  const wsRoot = getWorkspaceRoot();
   const os = require('os');
   const tempDir = path.join(os.tmpdir(), `ws_files_cmd_${Date.now()}`);
   fs.mkdirSync(tempDir, { recursive: true });
@@ -498,16 +466,7 @@ test('Model Request Tools - /files command shows files in workspace when rootPat
   // Write a mock project file to tempDir
   fs.writeFileSync(path.join(tempDir, 'mock_proj_file.txt'), 'content');
 
-  const cleanup = () => {
-    try {
-      const activeTxt = path.join(wsRoot, 'active.txt');
-      if (fs.existsSync(activeTxt)) fs.unlinkSync(activeTxt);
-      const wsPath = path.join(wsRoot, testWsId);
-      if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
-    } catch {}
-  };
-
-  cleanup();
+  const ctx = createTestContext(testWsId);
 
   try {
     ensureWorkspace(testWsId, { name: 'Files Command Test', rootPath: tempDir });
@@ -529,7 +488,7 @@ test('Model Request Tools - /files command shows files in workspace when rootPat
     assert.match(outputString, /Workspace project root/i);
     assert.match(outputString, /mock_proj_file\.txt/);
   } finally {
-    cleanup();
+    ctx.cleanup();
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   }
 });
@@ -539,25 +498,15 @@ test('Model Request Tools - /files command gives clear missing-rootPath message 
   const {
     setActiveWorkspace,
     ensureWorkspace,
-    getWorkspaceRoot,
     loadWorkspaceManifest,
     saveWorkspaceManifest,
   } = require('../src/governor/project_workspace');
   const testWsId = 'ws-files-command-missing';
-  const wsRoot = getWorkspaceRoot();
   
-  const cleanup = () => {
-    try {
-      const activeTxt = path.join(wsRoot, 'active.txt');
-      if (fs.existsSync(activeTxt)) fs.unlinkSync(activeTxt);
-      const wsPath = path.join(wsRoot, testWsId);
-      if (fs.existsSync(wsPath)) fs.rmSync(wsPath, { recursive: true, force: true });
-    } catch {}
-  };
-
-  cleanup();
+  const ctx = createTestContext(testWsId);
 
   try {
+    ensureWorkspace(testWsId, { name: 'Files Command Missing Test' });
     setActiveWorkspace(testWsId);
     const manifest = loadWorkspaceManifest(testWsId);
     manifest.rootPath = '';
@@ -578,6 +527,159 @@ test('Model Request Tools - /files command gives clear missing-rootPath message 
     const outputString = logged.join('\n');
     assert.match(outputString, /Active workspace has no target project root set/);
   } finally {
-    cleanup();
+    ctx.cleanup();
+  }
+});
+
+// Test 12: active workspace persists across module reload
+test('Model Request Tools - active workspace persists across module reload', () => {
+  const { setActiveWorkspace, getActiveWorkspace } = require('../src/governor/project_workspace');
+  const testWsId = 'ws-persistence-test';
+  const ctx = createTestContext(testWsId);
+  try {
+    setActiveWorkspace(testWsId);
+    
+    // Clear require cache for project_workspace
+    const resolved = require.resolve('../src/governor/project_workspace');
+    delete require.cache[resolved];
+    
+    const { getActiveWorkspace: getActiveWorkspace2 } = require('../src/governor/project_workspace');
+    assert.equal(getActiveWorkspace2(), testWsId);
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+// Test 13: workspace_set_root succeeds after active workspace reload
+test('Model Request Tools - workspace_set_root succeeds after active workspace reload', async () => {
+  const { executeTool } = require('../bin/executor');
+  const { setActiveWorkspace } = require('../src/governor/project_workspace');
+  const testWsId = 'ws-reload-set-root';
+  const ctx = createTestContext(testWsId);
+  const tempDir = path.join(require('os').tmpdir(), `ws_reload_root_${Date.now()}`);
+  fs.mkdirSync(tempDir, { recursive: true });
+  try {
+    setActiveWorkspace(testWsId);
+    
+    // Reload module
+    const resolved = require.resolve('../src/governor/project_workspace');
+    delete require.cache[resolved];
+    
+    const codeEditor = getAgent('code_editor');
+    const executeCtx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
+    
+    const result = await executeTool('workspace_set_root', {
+      rootPath: tempDir,
+      createIfMissing: true
+    }, executeCtx);
+    assert.ok(!result.error, `workspace_set_root failed: ${result.error}`);
+  } finally {
+    ctx.cleanup();
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+// Test 14: workspace_set_root createIfMissing=true creates missing directory
+test('Model Request Tools - workspace_set_root createIfMissing=true creates missing directory', async () => {
+  const { executeTool } = require('../bin/executor');
+  const { setActiveWorkspace } = require('../src/governor/project_workspace');
+  const testWsId = 'ws-create-missing-root';
+  const ctx = createTestContext(testWsId);
+  const tempDir = path.join(require('os').tmpdir(), `ws_missing_dir_${Date.now()}`);
+  try {
+    setActiveWorkspace(testWsId);
+    
+    const codeEditor = getAgent('code_editor');
+    const executeCtx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
+    
+    const result = await executeTool('workspace_set_root', {
+      rootPath: tempDir,
+      createIfMissing: true
+    }, executeCtx);
+    assert.ok(!result.error);
+    assert.ok(fs.existsSync(tempDir));
+  } finally {
+    ctx.cleanup();
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+// Test 15: workspace_set_root createIfMissing=false rejects missing directory
+test('Model Request Tools - workspace_set_root createIfMissing=false rejects missing directory', async () => {
+  const { executeTool } = require('../bin/executor');
+  const { setActiveWorkspace } = require('../src/governor/project_workspace');
+  const testWsId = 'ws-reject-missing-root';
+  const ctx = createTestContext(testWsId);
+  const tempDir = path.join(require('os').tmpdir(), `ws_missing_dir_${Date.now()}`);
+  try {
+    setActiveWorkspace(testWsId);
+    
+    const codeEditor = getAgent('code_editor');
+    const executeCtx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
+    
+    const result = await executeTool('workspace_set_root', {
+      rootPath: tempDir,
+      createIfMissing: false
+    }, executeCtx);
+    assert.ok(result.error);
+    assert.match(result.error, /does not exist on disk/);
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+// Test 16: workspace_status includes rootPath
+test('Model Request Tools - workspace_status includes rootPath', async () => {
+  const { executeTool } = require('../bin/executor');
+  const { setActiveWorkspace } = require('../src/governor/project_workspace');
+  const testWsId = 'ws-status-root-test';
+  const ctx = createTestContext(testWsId);
+  const tempDir = path.join(require('os').tmpdir(), `ws_status_root_${Date.now()}`);
+  fs.mkdirSync(tempDir, { recursive: true });
+  try {
+    setActiveWorkspace(testWsId, { rootPath: tempDir });
+    
+    const codeEditor = getAgent('code_editor');
+    const executeCtx = { currentTaskType: 'coding', activeAgent: codeEditor, config: {} };
+    
+    const result = await executeTool('workspace_status', {}, executeCtx);
+    assert.ok(!result.error);
+    const summary = JSON.parse(result.result);
+    assert.equal(summary.rootPath, tempDir);
+    assert.equal(summary.rootPathValid, true);
+  } finally {
+    ctx.cleanup();
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+// Test 17: duplicate workspace names are rejected
+test('Model Request Tools - duplicate workspace names are rejected', async () => {
+  const { executeTool } = require('../bin/executor');
+  const testWsId1 = 'browser-game-test';
+  const testWsId2 = 'browser_game_test';
+  
+  const ctx1 = createTestContext(testWsId1);
+  const ctx2 = createTestContext(testWsId2);
+  
+  try {
+    // Create first workspace
+    const res1 = await executeTool('workspace_create', {
+      projectId: testWsId1,
+      name: 'Game'
+    }, { currentTaskType: 'multi_step', activeAgent: getAgent('conductor'), config: {} });
+    assert.ok(!res1.error);
+    
+    // Try to create similar name duplicate
+    const res2 = await executeTool('workspace_create', {
+      projectId: testWsId2,
+      name: 'Game 2'
+    }, { currentTaskType: 'multi_step', activeAgent: getAgent('conductor'), config: {} });
+    
+    assert.ok(res2.error);
+    assert.match(res2.error, /similar name already exists/);
+  } finally {
+    ctx1.cleanup();
+    ctx2.cleanup();
   }
 });

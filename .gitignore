@@ -12,6 +12,9 @@ node_modules/
 .smallcode/memory.md
 .smallcode/TODO.md
 .smallcode/tool_scores.json
+.smallcode/workspaces/
+.smallcode/memory/
+.smallcode/screenshots/
 
 # Memory database (user data, not committed)
 .memory/
