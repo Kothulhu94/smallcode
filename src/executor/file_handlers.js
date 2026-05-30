@@ -2,7 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const { sanitizeToolOutput, safeResolvePath, escapeShellArg } = require('../security/sanitize');
-const { getReadTracker, getFileStateTracker, getSnapshotManager } = require('../../bin/memory');
+const { getReadTracker } = require('../tools/read_tracker');
+const { getFileStateTracker } = require('../session/file_state');
+const { getSnapshotManager } = require('../session/snapshot');
 
 function showMiniDiff(tui, filePath, oldStr, newStr, lineNum) {
   if (!tui) return;
