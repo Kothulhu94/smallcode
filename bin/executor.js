@@ -21,54 +21,47 @@ const { getReadTracker } = require('../src/tools/read_tracker');
 const { getSnapshotManager } = require('../src/session/snapshot');
 const { getFileStateTracker } = require('../src/session/file_state');
 
-// ─── RTK (Rust Token Killer) integration ─────────────────────────────────────
-// Auto-rewrites supported bash commands through rtk for 60-90% token savings.
-// Only activates if `rtk` binary is available on PATH.
-// https://github.com/rtk-ai/rtk
+const {
+  resetTurnFallback,
+  checkDuplicateToolCall,
+  recordSuccessfulToolCall
+} = require('../src/executor/suppression');
 
-let _rtkAvailable = null; // null = unchecked, true/false = cached result
+const {
+  authorizeAgentTool,
+  checkCodeEditorDrift,
+  enforceConstrainedFileSet,
+  checkWorkspaceRoot,
+  checkDirectoryTraversal
+} = require('../src/executor/authorization');
 
-function _checkRtk() {
-  if (_rtkAvailable !== null) return _rtkAvailable;
-  try {
-    const { execSync } = require('child_process');
-    execSync('rtk --version', { stdio: 'ignore', timeout: 2000 });
-    _rtkAvailable = true;
-  } catch {
-    _rtkAvailable = false;
-  }
-  return _rtkAvailable;
-}
+const { rtkRewrite } = require('../src/executor/rtk_rewrite');
+const { handleListProjects, handleGraphSearch, handleExplainSymbol } = require('../src/executor/project_handlers');
+const {
+  handleWorkspaceCreate,
+  handleWorkspaceList,
+  handleWorkspaceSetActive,
+  handleWorkspaceStatus,
+  handleWorkspaceAddTask,
+  handleWorkspaceAddPlan,
+  handleWorkspaceAddArtifact,
+  handleWorkspaceLinkRun,
+  handleWorkspaceSetRoot,
+  handleWorkspaceDiagnose
+} = require('../src/executor/workspace_handlers');
+const {
+  handleReadFile,
+  handleWriteFile,
+  handleAppendFile,
+  handlePatch,
+  handleReadAndPatch,
+  handleCreateAndRun,
+  handleFindAndRead,
+  handleSearchAndRead
+} = require('../src/executor/file_handlers');
+const { handleBash, handleRun } = require('../src/executor/run_handlers');
 
-// Commands RTK supports — maps regex to rtk subcommand.
-// These produce significantly smaller output than raw commands.
-const RTK_REWRITES = [
-  // Git
-  { re: /^git\s+(status|log|diff|add|commit|push|pull|fetch|branch|show)\b/, rewrite: (cmd) => 'rtk ' + cmd },
-  // Test runners
-  { re: /^(cargo\s+test|jest|vitest|pytest|go\s+test|npm\s+test|yarn\s+test|pnpm\s+test|rake\s+test|rspec)\b/, rewrite: (cmd) => 'rtk ' + cmd },
-  // Build/lint
-  { re: /^(cargo\s+build|cargo\s+clippy|tsc\b|eslint|ruff\s+check|golangci-lint|rubocop)\b/, rewrite: (cmd) => 'rtk ' + cmd },
-  // File ops
-  { re: /^(ls|find\s|grep\s|rg\s)/, rewrite: (cmd) => 'rtk ' + cmd },
-  // Docker/k8s
-  { re: /^docker\s+(ps|images|logs|compose\s+ps)\b/, rewrite: (cmd) => 'rtk ' + cmd },
-  { re: /^kubectl\s+(get\s+pods|logs|get\s+services)\b/, rewrite: (cmd) => 'rtk ' + cmd },
-  // npm/pnpm/yarn list
-  { re: /^(npm\s+list|pnpm\s+list|yarn\s+list)\b/, rewrite: (cmd) => 'rtk ' + cmd },
-];
 
-function _rtkRewrite(command) {
-  if (!_checkRtk()) return command;
-  // Don't double-rewrite if already starts with rtk
-  if (command.trimStart().startsWith('rtk ')) return command;
-  for (const { re, rewrite } of RTK_REWRITES) {
-    if (re.test(command.trimStart())) {
-      return rewrite(command.trimStart());
-    }
-  }
-  return command;
-}
 
 function showMiniDiff(tui, filePath, oldStr, newStr, lineNum) {
   const diff = tui.renderDiff(filePath, oldStr, newStr, lineNum);
@@ -81,35 +74,9 @@ async function executeTool(name, args, ctx) {
   const cwd = process.cwd();
 
   // Agent Registry Tool Permission Enforcement (Milestone 5)
-  if (ctx && (ctx.activeAgent || ctx.currentTaskType)) {
-    try {
-      const { authorizeToolForAgent, getActiveAgentContext } = require('../src/governor/agent_registry');
-      const authResult = authorizeToolForAgent(name, ctx.activeAgent || ctx.currentTaskType);
-
-      // Milestone 6A: Record authorization event in run ledger
-      try {
-        const { getLedger } = require('../src/governor/run_ledger');
-        const agentCtx = ctx.activeAgent || (ctx.currentTaskType ? getActiveAgentContext(ctx.currentTaskType) : null);
-        getLedger().recordAuthorization({
-          runId: ctx._ledgerRunId || null,
-          toolName: name,
-          taskType: ctx.currentTaskType || (ctx.activeAgent ? ctx.activeAgent.agentId : null),
-          agentId: agentCtx?.agentId || null,
-          mode: process.env.SMALLCODE_ENFORCEMENT_MODE || 'warn',
-          authorized: authResult.authorized !== false,
-          reason: authResult.reason || authResult.warning || null,
-        });
-      } catch (e) { /* ledger errors are contained */ }
-
-      if (authResult.authorized === false) {
-        return { error: authResult.reason };
-      }
-      if (authResult.warning) {
-        console.warn(authResult.warning);
-      }
-    } catch (e) {
-      // Contain enforcement errors
-    }
+  const authCheck = authorizeAgentTool(name, ctx);
+  if (authCheck.error) {
+    return { error: authCheck.error };
   }
 
   // Sanitize all string args — strip ANSI escape sequences the model may have
@@ -123,12 +90,24 @@ async function executeTool(name, args, ctx) {
     }
   }
 
+  // Duplicate Tool Call Suppression
+  const dupCheck = checkDuplicateToolCall(ctx, name, args);
+  if (dupCheck.error) {
+    return dupCheck; // returns { error: ... }
+  }
+  const callSet = dupCheck.callSet;
+  const callHash = dupCheck.callHash;
+
   const toolStart = Date.now();
   let result;
   try {
     result = await _executeToolInner(name, args, ctx);
   } catch (e) {
     result = { error: e.message || String(e) };
+  }
+
+  if (!result.error) {
+    recordSuccessfulToolCall(callSet, callHash);
   }
 
   // Record tool call in ledger
@@ -168,27 +147,28 @@ async function _executeToolInner(name, args, ctx) {
   const writeTools = new Set(['write_file', 'append_file', 'patch', 'read_and_patch', 'create_and_run', 'bone_compile']);
   const readTools = new Set(['read_file', 'find_files', 'search', 'find_and_read', 'search_and_read', 'bone_check']);
 
-  if (activeWorkspaceId) {
-    const targetRoot = getActiveTargetRoot();
-    if (targetRoot.ok) {
-      cwd = targetRoot.rootPath;
-    } else {
-      if (writeTools.has(name)) {
-        return { error: 'Active workspace has no target project root set. Set rootPath before writing project files.' };
-      }
-      if (readTools.has(name)) {
-        return { error: 'Active workspace has no target project root set. Set rootPath before reading project files.' };
-      }
-    }
+  // Executor Defense-in-Depth for code_editor task drift
+  const driftCheck = checkCodeEditorDrift(name, ctx);
+  if (driftCheck.error) {
+    return driftCheck;
   }
 
+  // Constrained File Set Enforcement
+  const fileSetCheck = enforceConstrainedFileSet(name, args, ctx, writeTools);
+  if (fileSetCheck.error) {
+    return fileSetCheck;
+  }
+
+  const rootCheck = checkWorkspaceRoot(name, activeWorkspaceId, getActiveTargetRoot, writeTools, readTools);
+  if (rootCheck.error) {
+    return rootCheck;
+  }
+  cwd = rootCheck.cwd;
+
   // Reject directory traversal patterns for file/pattern tools
-  if (args && typeof args === 'object') {
-    for (const key of ['path', 'pattern']) {
-      if (typeof args[key] === 'string' && (args[key].includes('..') || args[key].includes('..\\') || args[key].includes('../'))) {
-        return { error: `${name} rejected: ${key} contains directory traversal sequence: "${args[key]}"` };
-      }
-    }
+  const travCheck = checkDirectoryTraversal(name, args);
+  if (travCheck.error) {
+    return travCheck;
   }
 
   switch (name) {
@@ -290,617 +270,27 @@ async function _executeToolInner(name, args, ctx) {
       }
     }
 
-    case 'workspace_create': {
-      try {
-        const { setActiveWorkspace, getWorkspaceSummary, normalizeProjectId, listWorkspaces } = require('../src/governor/project_workspace');
-        const normId = normalizeProjectId(args.projectId);
+    case 'workspace_create': return await handleWorkspaceCreate(args, ctx);
+    case 'workspace_list': return await handleWorkspaceList(args, ctx);
+    case 'workspace_set_active': return await handleWorkspaceSetActive(args, ctx);
+    case 'workspace_status': return await handleWorkspaceStatus(args, ctx);
+    case 'workspace_add_task': return await handleWorkspaceAddTask(args, ctx);
+    case 'workspace_add_plan': return await handleWorkspaceAddPlan(args, ctx);
+    case 'workspace_add_artifact': return await handleWorkspaceAddArtifact(args, ctx);
+    case 'workspace_link_run': return await handleWorkspaceLinkRun(args, ctx);
+    case 'workspace_set_root': return await handleWorkspaceSetRoot(args, ctx);
+    case 'workspace_diagnose': return await handleWorkspaceDiagnose(args, ctx);
 
-        const canonical = (id) => id.toLowerCase().replace(/[-_]/g, '');
-        const normCanonical = canonical(normId);
+    case 'read_file': return await handleReadFile(args, cwd);
+    case 'write_file': return await handleWriteFile(args, cwd, _fullscreenRef);
+    case 'append_file': return await handleAppendFile(args, cwd);
+    case 'patch': return await handlePatch(args, cwd, _fullscreenRef, tui);
+    case 'read_and_patch': return await handleReadAndPatch(args, cwd, tui);
+    case 'create_and_run': return await handleCreateAndRun(args, cwd);
+    case 'find_and_read': return await handleFindAndRead(args, cwd);
+    case 'search_and_read': return await handleSearchAndRead(args, cwd);
 
-        const existing = listWorkspaces();
-        const duplicate = existing.find(w => canonical(w.projectId) === normCanonical);
-
-        if (duplicate) {
-          if (duplicate.projectId === normId) {
-            return { error: `Workspace "${normId}" already exists. Use workspace_set_active to make it active instead of creating a duplicate.` };
-          } else {
-            return { error: `Workspace with a similar name already exists: "${duplicate.projectId}". Use workspace_set_active to use it instead of creating a duplicate.` };
-          }
-        }
-
-        const activeId = setActiveWorkspace(normId, {
-          name: args.name,
-          description: args.description,
-          goal: args.goal,
-          constraints: args.constraints,
-          rootPath: args.rootPath,  // optional: absolute path to target project root
-        });
-        const summary = getWorkspaceSummary(activeId);
-        if (ctx && ctx._ledgerRunId) {
-          const { linkRunToWorkspace } = require('../src/governor/project_workspace');
-          let runMeta = {};
-          try {
-            const { getLedger } = require('../src/governor/run_ledger');
-            const runData = getLedger().getRun(ctx._ledgerRunId);
-            if (runData) {
-              runMeta = {
-                createdAt: runData.started_at,
-                taskType: runData.task_type,
-                activeAgentId: runData.agent_id,
-                modelPreset: runData.model_preset,
-                promptPreview: runData.prompt
-              };
-            }
-          } catch (e) {}
-          linkRunToWorkspace(normId, ctx._ledgerRunId, runMeta);
-        }
-        return {
-          action: 'Created and activated workspace',
-          projectId: normId,
-          result: `Workspace "${normId}" created successfully and set as active.\n\nSummary:\n${JSON.stringify(summary, null, 2)}`
-        };
-      } catch (err) {
-        return { error: `Failed to create workspace: ${err.message}` };
-      }
-    }
-
-    case 'workspace_list': {
-      try {
-        const { listWorkspaces } = require('../src/governor/project_workspace');
-        const list = listWorkspaces();
-        return {
-          result: JSON.stringify(list, null, 2)
-        };
-      } catch (err) {
-        return { error: `Failed to list workspaces: ${err.message}` };
-      }
-    }
-
-    case 'workspace_set_active': {
-      try {
-        const { setActiveWorkspace, getWorkspaceSummary } = require('../src/governor/project_workspace');
-        const normId = setActiveWorkspace(args.projectId);
-        const summary = getWorkspaceSummary(normId);
-        if (ctx && ctx._ledgerRunId) {
-          const { linkRunToWorkspace } = require('../src/governor/project_workspace');
-          let runMeta = {};
-          try {
-            const { getLedger } = require('../src/governor/run_ledger');
-            const runData = getLedger().getRun(ctx._ledgerRunId);
-            if (runData) {
-              runMeta = {
-                createdAt: runData.started_at,
-                taskType: runData.task_type,
-                activeAgentId: runData.agent_id,
-                modelPreset: runData.model_preset,
-                promptPreview: runData.prompt
-              };
-            }
-          } catch (e) {}
-          linkRunToWorkspace(normId, ctx._ledgerRunId, runMeta);
-        }
-        return {
-          action: 'Set active workspace',
-          projectId: normId,
-          result: `Workspace "${normId}" is now active.\n\nSummary:\n${JSON.stringify(summary, null, 2)}`
-        };
-      } catch (err) {
-        return { error: `Failed to set active workspace: ${err.message}` };
-      }
-    }
-
-    case 'workspace_status': {
-      try {
-        const { getActiveWorkspace, getWorkspaceSummary, diagnoseWorkspaceState } = require('../src/governor/project_workspace');
-        const activeId = getActiveWorkspace();
-        if (!activeId) {
-          const diagnostics = diagnoseWorkspaceState();
-          let message = 'No active project workspace is set. Call workspace_create or workspace_set_active first.';
-          if (diagnostics.availableWorkspaceIds.length > 0) {
-            message += `\n\nAvailable workspaces: ${diagnostics.availableWorkspaceIds.join(', ')}. Use workspace_set_active with one of these project IDs to restore state, or create a new workspace.`;
-          }
-          message += `\n\nDiagnostics:\n${JSON.stringify(diagnostics, null, 2)}`;
-          return {
-            result: message,
-            diagnostics
-          };
-        }
-        const summary = getWorkspaceSummary(activeId);
-        return {
-          result: JSON.stringify(summary, null, 2)
-        };
-      } catch (err) {
-        return { error: `Failed to get workspace status: ${err.message}` };
-      }
-    }
-
-    case 'workspace_add_task': {
-      try {
-        const { getActiveWorkspace, writeWorkspaceArtifact } = require('../src/governor/project_workspace');
-        const activeId = getActiveWorkspace();
-        if (!activeId) {
-          return { error: 'No active workspace. Please set an active workspace first.' };
-        }
-        const safeTitle = args.title.trim().toLowerCase()
-          .replace(/\s+/g, '-')
-          .replace(/[^a-z0-9\-]/g, '');
-        const filename = `${safeTitle || 'task'}.md`;
-        const fullPath = writeWorkspaceArtifact(activeId, 'tasks', filename, args.content);
-        return {
-          action: 'Added task',
-          path: filename,
-          result: `Task added successfully to active workspace "${activeId}".\nSaved to tasks/${filename} (Absolute: ${fullPath})`
-        };
-      } catch (err) {
-        return { error: `Failed to add task: ${err.message}` };
-      }
-    }
-
-    case 'workspace_add_plan': {
-      try {
-        const { getActiveWorkspace, writeWorkspaceArtifact } = require('../src/governor/project_workspace');
-        const activeId = getActiveWorkspace();
-        if (!activeId) {
-          return { error: 'No active workspace. Please set an active workspace first.' };
-        }
-        const safeTitle = args.title.trim().toLowerCase()
-          .replace(/\s+/g, '-')
-          .replace(/[^a-z0-9\-]/g, '');
-        const filename = `${safeTitle || 'plan'}.md`;
-        const fullPath = writeWorkspaceArtifact(activeId, 'plans', filename, args.content);
-        return {
-          action: 'Added plan',
-          path: filename,
-          result: `Plan added successfully to active workspace "${activeId}".\nSaved to plans/${filename} (Absolute: ${fullPath})`
-        };
-      } catch (err) {
-        return { error: `Failed to add plan: ${err.message}` };
-      }
-    }
-
-    case 'workspace_add_artifact': {
-      try {
-        const { getActiveWorkspace, writeWorkspaceArtifact } = require('../src/governor/project_workspace');
-        const activeId = getActiveWorkspace();
-        if (!activeId) {
-          return { error: 'No active workspace. Please set an active workspace first.' };
-        }
-        if (args.name.includes('/') || args.name.includes('\\') || args.name.includes('..')) {
-          return { error: 'Artifact name must not contain directory separators or traversal sequences.' };
-        }
-        const fullPath = writeWorkspaceArtifact(activeId, 'artifacts', args.name, args.content);
-        return {
-          action: 'Added artifact',
-          path: args.name,
-          result: `Artifact "${args.name}" added successfully to active workspace "${activeId}".\nSaved to artifacts/${args.name} (Absolute: ${fullPath})`
-        };
-      } catch (err) {
-        return { error: `Failed to add artifact: ${err.message}` };
-      }
-    }
-
-    case 'workspace_link_run': {
-      try {
-        const { getActiveWorkspace, linkRunToWorkspace } = require('../src/governor/project_workspace');
-        const activeId = getActiveWorkspace();
-        if (!activeId) {
-          return { error: 'No active workspace. Please set an active workspace first.' };
-        }
-        let runMeta = {};
-        try {
-          const { getLedger } = require('../src/governor/run_ledger');
-          const runData = getLedger().getRun(args.runId);
-          if (runData) {
-            runMeta = {
-              createdAt: runData.started_at,
-              taskType: runData.task_type,
-              activeAgentId: runData.agent_id,
-              modelPreset: runData.model_preset,
-              promptPreview: runData.prompt
-            };
-          }
-        } catch (e) {}
-        linkRunToWorkspace(activeId, args.runId, runMeta);
-        return {
-          action: 'Linked run',
-          result: `Run "${args.runId}" linked successfully to active workspace "${activeId}".`
-        };
-      } catch (err) {
-        return { error: `Failed to link run: ${err.message}` };
-      }
-    }
-
-    case 'workspace_set_root': {
-      try {
-        const { getActiveWorkspace, ensureWorkspace, getWorkspaceSummary, validateTargetRoot } = require('../src/governor/project_workspace');
-        const activeId = getActiveWorkspace();
-        if (!activeId) {
-          return { error: 'No active workspace. Please set an active workspace first.' };
-        }
-        
-        let targetPath = args.rootPath;
-        if (typeof targetPath !== 'string' || !targetPath.trim()) {
-          return { error: 'rootPath must be a non-empty string.' };
-        }
-        
-        if (targetPath.includes('..')) {
-          return { error: `rootPath contains directory traversal sequence: "${targetPath}".` };
-        }
-        
-        if (!path.isAbsolute(targetPath)) {
-          return { error: `rootPath must be an absolute path. Got: "${targetPath}".` };
-        }
-        
-        const resolvedPath = path.resolve(targetPath);
-        
-        const createIfMissing = !!args.createIfMissing;
-        if (!fs.existsSync(resolvedPath)) {
-          if (createIfMissing) {
-            fs.mkdirSync(resolvedPath, { recursive: true });
-          } else {
-            return { error: `rootPath does not exist on disk: "${resolvedPath}". Set createIfMissing to true to create it.` };
-          }
-        }
-        
-        validateTargetRoot(resolvedPath, { mustExist: true });
-        
-        ensureWorkspace(activeId, { rootPath: resolvedPath });
-        
-        const summary = getWorkspaceSummary(activeId);
-        return {
-          action: 'Set workspace root',
-          projectId: activeId,
-          rootPath: resolvedPath,
-          result: `Workspace "${activeId}" target root path successfully updated to: ${resolvedPath}.\n\nWorkspace Summary:\n${JSON.stringify(summary, null, 2)}`
-        };
-      } catch (err) {
-        return { error: `Failed to set workspace root: ${err.message}` };
-      }
-    }
-
-    case 'workspace_diagnose': {
-      try {
-        const { diagnoseWorkspaceState } = require('../src/governor/project_workspace');
-        const diagnostics = diagnoseWorkspaceState();
-        return {
-          result: JSON.stringify(diagnostics, null, 2)
-        };
-      } catch (err) {
-        return { error: `Failed to run workspace diagnostics: ${err.message}` };
-      }
-    }
-
-    case 'read_file': {
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { error: `read_file rejected: ${safe.reason}` };
-      const filePath = safe.fullPath;
-      if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path} (checked: ${filePath})` };
-      // Mark as read so the write-guard (Feature 5) lets subsequent writes through
-      try { getReadTracker().recordRead(filePath, cwd); } catch {}
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const lines = content.split('\n');
-      const start = (args.start_line || 1) - 1;
-      const end = args.end_line || lines.length;
-      const slice = lines.slice(start, end);
-      // Sanitize before sending to the model: strip ANSI/control chars and
-      // redact any secrets the file may contain (e.g. .env, token files).
-      const safeSlice = slice.map(l => sanitizeToolOutput(l));
-      const numbered = safeSlice.map((l, i) => `${String(start + i + 1).padStart(4)}│ ${l}`).join('\n');
-
-      // Diff-based context (Feature #16): when SMALLCODE_DIFF_CONTEXT=true
-      // and the model has already read this file, return a diff instead of the
-      // full content. Falls back to full content if diff is too large or if the
-      // file hasn't changed. Only applies when no line range is requested.
-      if (!args.start_line && !args.end_line) {
-        try {
-          const tracker = getFileStateTracker();
-          const result = tracker.record(filePath, content);
-          if (result.mode === 'unchanged') {
-            return { result: `${args.path} (${lines.length} lines — unchanged since last read, no diff)` };
-          }
-          if (result.mode === 'diff') {
-            return { result: `${args.path} changes since last read (${result.fullLength} lines total):\n${sanitizeToolOutput(result.diff)}` };
-          }
-          // mode === 'full' — fall through to normal path below
-        } catch {} // diff tracker failure is always non-fatal
-      }
-
-      // Feature 2: summarize large files (>200 lines, no line range requested)
-      // This saves context by replacing the full file with signatures + key logic
-      if (lines.length > 200 && !args.start_line && !args.end_line) {
-        try {
-          const { summarizeFileCompiled } = require('./features_adapter');
-          if (summarizeFileCompiled) {
-            const summary = await summarizeFileCompiled(args.path, content, 600);
-            if (summary && summary.length > 50) {
-              return { result: `${args.path} (${lines.length} lines — summarized):\n${sanitizeToolOutput(summary)}` };
-            }
-          }
-        } catch {} // fall through to full content on any error
-      }
-
-      return { result: `${args.path} (${lines.length} lines):\n${numbered}` };
-    }
-
-    case 'write_file': {
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { error: `write_file rejected: ${safe.reason}` };
-      const filePath = safe.fullPath;
-      // Read-before-write guard — small models often overwrite files they
-      // never read. First write to an unread existing file is refused with
-      // a hint; second attempt allowed (so legitimate "fully replace" intents
-      // succeed). Disable with SMALLCODE_WRITE_GUARD=false.
-      const tracker = getReadTracker();
-      const guard = tracker.checkWrite(filePath, cwd);
-      if (!guard.ok) {
-        return { error: guard.reason };
-      }
-      const dir = path.dirname(filePath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      // Guard against corrupted large writes — if content is suspiciously large
-      // (>200KB) or empty after a JSON parse error, refuse rather than corrupt.
-      if (!args.content && args.content !== '') {
-        return { error: `write_file: content is missing or undefined for ${args.path}` };
-      }
-      // Content length guard — llama.cpp JSON parser fails at ~13k chars in tool_call arguments.
-      // We enforce a limit well below that. For new large files, the model must use a
-      // skeleton + patch strategy (instructed in the system prompt).
-      const MAX_CONTENT_CHARS = 8000; // ~200 lines of dense code, well under llama.cpp's limit
-      if (args.content.length > MAX_CONTENT_CHARS) {
-        const lineCount = args.content.split('\n').length;
-        return {
-          error: `write_file: content too large (${lineCount} lines / ${Math.round(args.content.length/1024)}KB). ` +
-            `llama.cpp cannot parse tool calls larger than ~8KB. ` +
-            `Strategy: write a skeleton file first (imports + empty function stubs), ` +
-            `then use multiple patch calls to fill in each section. ` +
-            `Keep each write_file under 60 lines.`,
-        };
-      }
-      const existed = fs.existsSync(filePath);
-      const oldContent = existed ? fs.readFileSync(filePath, 'utf-8') : null;
-      // Snapshot for auto-rollback (Feature 9). No-op if no checkpoint open.
-      try { getSnapshotManager({ workdir: cwd }).note(filePath, oldContent); } catch {}
-      fs.writeFileSync(filePath, args.content);
-      tracker.recordWrite(filePath, cwd);
-      // Update diff tracker so subsequent reads see the new state
-      try { getFileStateTracker().recordWrite(filePath, args.content); } catch {}
-      const lineCount = args.content.split('\n').length;
-      const action = existed ? 'Updated' : 'Created';
-      if (_fullscreenRef && existed && oldContent) {
-        const preview = oldContent.split('\n').slice(0, 5).join('\n');
-        const newPreview = args.content.split('\n').slice(0, 5).join('\n');
-        _fullscreenRef.addDiff(args.path, preview + '\n...', newPreview + '\n...', 1);
-      }
-      return { result: `${action} ${args.path} (${lineCount} lines)`, action, path: args.path, lines: lineCount };
-    }
-
-    case 'append_file': {
-      // append_file: lets the model build large files in chunks, avoiding
-      // llama.cpp's ~13KB JSON parse limit that breaks large write_file calls.
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { error: `append_file rejected: ${safe.reason}` };
-      const filePath = safe.fullPath;
-      if (!args.content && args.content !== '') {
-        return { error: 'append_file: content is missing' };
-      }
-      if (args.content.length > 8000) {
-        return { error: `append_file: chunk too large (${Math.round(args.content.length/1024)}KB). Keep each append under 60 lines.` };
-      }
-      if (!fs.existsSync(filePath)) {
-        return { error: `append_file: file not found: ${args.path}. Create it first with write_file.` };
-      }
-      const before = fs.readFileSync(filePath, 'utf-8');
-      // Snapshot for auto-rollback (Feature 9) — record state before appending
-      try { getSnapshotManager({ workdir: cwd }).note(filePath, before); } catch {}
-      // Add newline separator if file doesn't end with one
-      const sep = before.length > 0 && !before.endsWith('\n') ? '\n' : '';
-      const newContent = before + sep + args.content;
-      fs.writeFileSync(filePath, newContent);
-      try { getFileStateTracker().recordWrite(filePath, newContent); } catch {}
-      try { getReadTracker().recordWrite(filePath, cwd); } catch {}
-      const totalLines = newContent.split('\n').length;
-      const addedLines = args.content.split('\n').length;
-      return { result: `Appended ${addedLines} lines to ${args.path} (now ${totalLines} lines total)`, action: 'Appended', path: args.path };
-    }
-
-    case 'patch': {
-      const __missing = ['path', 'old_str', 'new_str']
-        .filter(k => typeof args[k] !== 'string');
-      if (__missing.length) {
-        return {
-          error: `patch: missing or non-string arg(s): ${__missing.join(', ')}. ` +
-                 `received: ${JSON.stringify(args).slice(0, 200)}`,
-          kind: 'validation',
-        };
-      }
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { error: `patch rejected: ${safe.reason}` };
-      const filePath = safe.fullPath;
-      if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path} (checked: ${filePath})` };
-      // Patching counts as having read the file (it requires old_str matching)
-      try { getReadTracker().recordRead(filePath, cwd); } catch {}
-      let content = fs.readFileSync(filePath, 'utf-8');
-      // Snapshot for auto-rollback (Feature 9). No-op if no checkpoint open.
-      try { getSnapshotManager({ workdir: cwd }).note(filePath, content); } catch {}
-      const count = content.split(args.old_str).length - 1;
-      if (count === 0) {
-        // MarrowScript Rank 7: semantic_merge — recover from old_str not found.
-        // When the model tries to patch a file but provides an old_str that
-        // doesn't exactly match (e.g. whitespace drift from tokenization),
-        // semanticMerge attempts a fuzzy reconstruction. The result is a full
-        // file replacement, not a surgical patch — acceptable as a fallback
-        // because the original old_str already failed to match.
-        try {
-          const { semanticMerge } = require('./features_adapter');
-          if (semanticMerge) {
-            const merged = await semanticMerge(args.path, args.new_str, content);
-            if (merged && merged.length > 0) {
-              // Strip ANSI codes from model-returned content before writing to disk
-              const { stripAnsi: _stripAnsiMerge } = require('../src/security/sanitize');
-              const cleanMerged = _stripAnsiMerge ? _stripAnsiMerge(merged) : merged;
-              fs.writeFileSync(filePath, cleanMerged);
-              try { getFileStateTracker().recordWrite(filePath, cleanMerged); } catch {}
-              const oldLines = content.split('\n').length;
-              const newLines = cleanMerged.split('\n').length;
-              if (_fullscreenRef) {
-                _fullscreenRef.addDiff(args.path, content.slice(0, 200), cleanMerged.slice(0, 200), 1);
-              } else {
-                showMiniDiff(tui, args.path, content.slice(0, 200), cleanMerged.slice(0, 200), 1);
-              }
-              return { result: `Patched ${args.path} via semantic merge (${oldLines} → ${newLines} lines)`, action: 'Edited', path: args.path, line: 1 };
-            }
-          }
-        } catch {}
-        return { error: `old_str not found in ${args.path}` };
-      }
-      if (count > 1) return { error: `old_str matches ${count} locations. Include more context.` };
-      content = content.replace(args.old_str, args.new_str);
-      fs.writeFileSync(filePath, content);
-      try { getFileStateTracker().recordWrite(filePath, content); } catch {}
-      const lineNum = content.slice(0, content.indexOf(args.new_str)).split('\n').length;
-      const oldLines = args.old_str.split('\n').length;
-      const newLines = args.new_str.split('\n').length;
-      if (_fullscreenRef) {
-        _fullscreenRef.addDiff(args.path, args.old_str, args.new_str, lineNum);
-      } else {
-        showMiniDiff(tui, args.path, args.old_str, args.new_str, lineNum);
-      }
-      return { result: `Patched ${args.path}: replaced ${oldLines} lines with ${newLines} lines at line ${lineNum}`, action: 'Edited', path: args.path, line: lineNum };
-    }
-
-    case 'bash': {
-      let command = args.command;
-
-      // RTK (Rust Token Killer) auto-rewrite — if rtk is on PATH, prefix supported
-      // commands to compress output by 60-90% before it reaches the model's context.
-      // Opt-out: set SMALLCODE_RTK=false in .env
-      // Docs: https://github.com/rtk-ai/rtk
-      if (process.env.SMALLCODE_RTK !== 'false') {
-        command = _rtkRewrite(command);
-      }
-
-      // Detect commands that start long-running servers (will block and timeout).
-      // IMPORTANT: only block on actual server indicators — NOT generic filenames
-      // like main.py, index.js which are standard entry points that run and exit.
-      // Match: files explicitly named *server*, *app* (as standalone), or framework
-      // scripts that are always blocking (uvicorn, gunicorn, etc.)
-      const blockingPatterns = /^(node|python|python3|ruby|php|go run|deno run|bun run)\s+.*\b(server\.(js|py|rb|php|ts)|app\.(js|py|rb|php|ts))\b/i;
-      const explicitServers = /\b(uvicorn|gunicorn|rails\s+s|npm\s+start|yarn\s+start|npm\s+run\s+dev|python3?\s+-m\s+(flask|django|uvicorn|aiohttp\.web|fastapi)|puma|unicorn|passenger)\b/i;
-      if (blockingPatterns.test(command) || explicitServers.test(command)) {
-        // Check if it's actually a --check or test command (those are fine)
-        if (!command.includes('--check') && !command.includes('--version') && !command.includes('test')) {
-          return {
-            result: `Refused: "${command}" would start a long-running server that blocks. Use "node --check <file>" to verify syntax, or describe what you want to test and I'll use a non-blocking approach.`,
-            error: 'Blocking command detected',
-            command,
-          };
-        }
-      }
-
-      // Detect scripts with interactive input (will EOF or block forever)
-      const scriptMatch = command.match(/^(?:python3?|node|ruby)\s+["']?([^\s"']+)/);
-      if (scriptMatch && !command.includes('--check') && !command.includes('-c') && !command.includes('-m')) {
-        const targetFile = path.resolve(cwd, scriptMatch[1]);
-        if (fs.existsSync(targetFile)) {
-          const fc = fs.readFileSync(targetFile, 'utf-8');
-          if (fc.includes('input(') || fc.includes('readline.question') || fc.includes('process.stdin.on')) {
-            return {
-              result: `Refused: "${command}" — file contains interactive input() calls that block in non-interactive mode. File created successfully. Verify syntax: python -m py_compile ${scriptMatch[1]}`,
-              error: 'Interactive script detected',
-              command,
-            };
-          }
-        }
-      }
-
-      if (process.platform === 'win32') {
-        command = command.replace(/^ls\b/, 'dir').replace(/^ls /, 'dir ').replace(/^cat /, 'type ').replace(/^rm -rf /, 'rmdir /s /q ').replace(/^rm /, 'del ').replace(/^touch /, 'echo.>').replace(/^cp /, 'copy ').replace(/^mv /, 'move ').replace(/^mkdir -p /, 'mkdir ');
-      }
-      if (flags && flags.verbose && _fullscreenRef) {
-        _fullscreenRef.addTool('bash', 'ok', `$ ${command}`);
-      }
-
-      // Persistent shell session: by default ON, can be disabled with
-      // SMALLCODE_SHELL_PERSIST=false. Maintains cwd, env vars, and shell
-      // state across calls so `cd src` followed by `ls` works as expected.
-      const usePersistent = process.env.SMALLCODE_SHELL_PERSIST !== 'false';
-      if (usePersistent) {
-        try {
-          const shell = getShell({ cwd, timeout: 30000 });
-          const result = await shell.run(command);
-          const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
-          const safeOutput = result.stdout || '';
-          const trimmed = safeOutput.length > maxOutput
-            ? safeOutput.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + safeOutput.slice(-300)
-            : safeOutput;
-          if (flags && flags.verbose && _fullscreenRef && trimmed.trim()) {
-            const lines = trimmed.split('\n').slice(0, 10);
-            for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
-          }
-          if (result.timedOut) {
-            return { result: trimmed || '(no output before timeout)', error: 'Timed out (killed after 30s)', command };
-          }
-          if (result.error) {
-            return { result: trimmed, error: result.error, command };
-          }
-          if (result.exitCode !== 0) {
-            // MarrowScript Rank 4: error_diagnosis — structured hint prepended to result
-            let diagHint = '';
-            try {
-              const { diagnoseError } = require('./features_adapter');
-              if (diagnoseError) {
-                const diag = await diagnoseError(command, result.stdout || '', result.exitCode);
-                if (diag && diag.suggestion) {
-                  const loc = diag.file ? ` in ${diag.file}${diag.line ? ':' + diag.line : ''}` : '';
-                  diagHint = `[ERROR-DIAGNOSIS] Type: ${diag.type}${loc}. Fix: ${diag.suggestion}\n\n`;
-                }
-              }
-            } catch {}
-            return { result: diagHint + (trimmed || '(no output)'), error: `Exit code ${result.exitCode}`, command };
-          }
-          return { result: trimmed || '(no output)', command };
-        } catch (e) {
-          // Fall through to one-shot execSync if persistent shell errors
-        }
-      }
-
-      // Fallback: one-shot execSync (original behavior, no state retention)
-      try {
-        const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
-        const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
-        const safeOutput = sanitizeToolOutput(output);
-        const trimmed = safeOutput.length > maxOutput ? safeOutput.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + safeOutput.slice(-300) : safeOutput;
-        if (flags && flags.verbose && _fullscreenRef && trimmed.trim()) {
-          const lines = trimmed.split('\n').slice(0, 10);
-          for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
-        }
-        return { result: trimmed || '(no output)', command };
-      } catch (e) {
-        const output = (e.stdout || '') + (e.stderr || '');
-        const safeOutput = sanitizeToolOutput(output);
-        const exitReason = (e.status === null || e.status === undefined) ? 'Timed out (killed after 30s)' : `Exit code ${e.status}`;
-        if (flags && flags.verbose && _fullscreenRef && safeOutput.trim()) {
-          const lines = safeOutput.split('\n').slice(0, 8);
-          for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
-        }
-        // MarrowScript Rank 4: error_diagnosis — structured hint for execSync fallback too
-        let diagHint = '';
-        if (e.status !== null && e.status !== undefined) {
-          try {
-            const { diagnoseError } = require('./features_adapter');
-            if (diagnoseError) {
-              const diag = await diagnoseError(command, safeOutput, e.status);
-              if (diag && diag.suggestion) {
-                const loc = diag.file ? ` in ${diag.file}${diag.line ? ':' + diag.line : ''}` : '';
-                diagHint = `[ERROR-DIAGNOSIS] Type: ${diag.type}${loc}. Fix: ${diag.suggestion}\n\n`;
-              }
-            }
-          } catch {}
-        }
-        return { result: diagHint + (safeOutput.slice(0, 2000) || sanitizeToolOutput(e.message || '')), error: exitReason, command };
-      }
-    }
+    case 'bash': return await handleBash(args, cwd, flags, _fullscreenRef, config, tui);
 
     case 'search': {
       try {
@@ -938,218 +328,18 @@ async function _executeToolInner(name, args, ctx) {
     }
 
     case 'list_projects': {
-      const listResult = await mcpCall('tools/call', { name: 'list_repos', arguments: {} });
-      if (listResult && listResult.content) {
-        try {
-          const data = JSON.parse(listResult.content[0]?.text || '{}');
-          const repos = data.repos || [];
-          if (repos.length === 0) return { result: 'No projects indexed yet. The code graph is empty.' };
-          let output = `Workspace: ${repos.length} indexed projects\n\n`;
-          for (const r of repos) {
-            output += `• ${r.name} — ${r.file_count || '?'} files, ${r.symbol_count || '?'} symbols, ${(r.languages || []).slice(0, 4).join(', ') || '?'}\n`;
-          }
-          return { result: output };
-        } catch (e) { return { result: listResult.content[0]?.text || 'Failed to parse repo list.' }; }
-      }
-      try {
-        const { formatSmartListing } = require('../src/tools/file_tree');
-        const listing = formatSmartListing(process.cwd(), '', { max: 40 });
-        return { result: `Files in ${process.cwd()}:\n${listing}` };
-      } catch {
-        const entries = fs.readdirSync(process.cwd(), { withFileTypes: true });
-        const dirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules');
-        return { result: `Projects in ${process.cwd()}:\n${dirs.map(d => `  - ${d.name}/`).join('\n')}` };
-      }
+      return await handleListProjects(mcpCall);
     }
 
     case 'graph_search': {
-      const maxTokens = args.max_tokens || 4000;
-      const graphResult = await mcpCall('tools/call', { name: 'search_graph', arguments: { query: args.query, max_tokens: maxTokens } });
-      if (graphResult && graphResult.content) {
-        const text = graphResult.content.map(c => c.text || '').join('\n');
-        return { result: sanitizeToolOutput(text) || 'No results from code graph.' };
-      }
-      try {
-        const cmd = buildCommand('rg', ['--line-number', '--max-count', '5'], String(args.query || '')) + ' .';
-        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
-        return { result: sanitizeToolOutput(output).slice(0, 3000) };
-      } catch { return { result: 'No matches found in code graph or files.' }; }
+      return await handleGraphSearch(mcpCall, args, cwd);
     }
 
     case 'explain_symbol': {
-      const graphResult = await mcpCall('tools/call', { name: 'explain_symbol', arguments: { symbol: args.symbol } });
-      if (graphResult && graphResult.content) {
-        const text = graphResult.content.map(c => c.text || '').join('\n');
-        return { result: sanitizeToolOutput(text) || `Symbol "${args.symbol}" not found in code graph.` };
-      }
-      try {
-        // Restrict the symbol arg to identifier-safe characters before
-        // building the regex to defend against shell metacharacters and
-        // regex DoS via catastrophic backtracking.
-        const sym = String(args.symbol || '').slice(0, 200);
-        if (!/^[A-Za-z_][A-Za-z0-9_:.$-]*$/.test(sym)) {
-          return { result: `Symbol "${sym}" is not a valid identifier.` };
-        }
-        const cmd = 'rg --line-number ' + escapeShellArg(`\\b${sym}\\b`) + ' . --max-count 10';
-        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
-        return { result: sanitizeToolOutput(`References to ${sym}:\n${output.slice(0, 2000)}`) };
-      } catch { return { result: `Symbol "${args.symbol}" not found.` }; }
+      return await handleExplainSymbol(mcpCall, args, cwd);
     }
 
-    case 'read_and_patch': {
-      const __missing = ['path', 'old_str', 'new_str']
-        .filter(k => typeof args[k] !== 'string');
-      if (__missing.length) {
-        return {
-          error: `read_and_patch: missing or non-string arg(s): ${__missing.join(', ')}. ` +
-                 `received: ${JSON.stringify(args).slice(0, 200)}`,
-          kind: 'validation',
-        };
-      }
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { error: `read_and_patch rejected: ${safe.reason}` };
-      const filePath = safe.fullPath;
-      if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path}` };
-      let content = fs.readFileSync(filePath, 'utf-8');
-      const count = content.split(args.old_str).length - 1;
-      if (count === 0) {
-        const lines = content.split('\n').slice(0, 50);
-        const numbered = lines.map((l, i) => `${(i+1).toString().padStart(4)}| ${sanitizeToolOutput(l)}`).join('\n');
-        return { error: `old_str not found. File content:\n${numbered}` };
-      }
-      if (count > 1) return { error: `old_str matches ${count} locations. Be more specific.` };
-      content = content.replace(args.old_str, args.new_str);
-      fs.writeFileSync(filePath, content);
-      const lineNum = content.slice(0, content.indexOf(args.new_str)).split('\n').length;
-      showMiniDiff(tui, args.path, args.old_str, args.new_str, lineNum);
-      return { result: `Read and patched ${args.path} at line ${lineNum}`, action: 'Edited', path: args.path, line: lineNum };
-    }
-
-    case 'create_and_run': {
-      const __missing = ['path', 'content']
-        .filter(k => typeof args[k] !== 'string');
-      if (__missing.length) {
-        return {
-          error: `create_and_run: missing or non-string arg(s): ${__missing.join(', ')}. ` +
-                 `received: ${JSON.stringify(args).slice(0, 200)}`,
-          kind: 'validation',
-        };
-      }
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { error: `create_and_run rejected: ${safe.reason}` };
-      const filePath = safe.fullPath;
-      const dir = path.dirname(filePath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      // Apply the same 8KB guard as write_file — llama.cpp can't parse larger tool calls
-      if (args.content && args.content.length > 8000) {
-        return { error: `create_and_run: content too large (${args.content.split('\n').length} lines). Use write_file (skeleton) + append_file (sections) + bash to run.` };
-      }
-      fs.writeFileSync(filePath, args.content || '');
-      const lines = args.content.split('\n').length;
-      let output = `Created ${args.path} (${lines} lines)`;
-      let cmdError = false;
-      if (args.command) {
-        // Check if the file contains interactive input calls that would block
-        const hasInteractive = args.content && (
-          args.content.includes('input(') ||     // Python input()
-          args.content.includes('readline') ||    // Node readline
-          args.content.includes('process.stdin') || // Node stdin
-          args.content.includes('Scanner(') ||    // Java Scanner
-          args.content.includes('gets') ||        // Ruby gets
-          args.content.includes('read()')         // generic read
-        );
-        if (hasInteractive) {
-          output += `\n⚠ File contains interactive input calls (input/readline/stdin). Skipping execution — the script would hang waiting for user input. Use node --check or python -c "import py_compile; py_compile.compile('${args.path}')" to verify syntax instead.`;
-          return { result: output, action: 'Created', path: args.path, lines };
-        }
-        // Also check for server-start patterns (same conservative matching as bash case)
-        const blockingPatterns = /^(node|python|python3|ruby|php)\s+.*\b(server\.(js|py|rb|php)|app\.(js|py|rb|php))\b/i;
-        const explicitServers = /\b(uvicorn|gunicorn|flask|django|express|fastify|npm\s+start)\b/i;
-        if (blockingPatterns.test(args.command) || explicitServers.test(args.command)) {
-          if (!args.command.includes('--check') && !args.command.includes('test')) {
-            output += `\n⚠ Command would start a long-running server. Skipping execution.`;
-            return { result: output, action: 'Created', path: args.path, lines };
-          }
-        }
-        try {
-          const cmdOut = execSync(args.command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024*1024 });
-          output += `\n$ ${args.command}\n${cmdOut.slice(0, 2000)}`;
-        } catch (e) {
-          cmdError = true;
-          const errOut = (e.stdout || '') + (e.stderr || e.message || '');
-          output += `\n$ ${args.command}\n${(e.status === null || e.status === undefined) ? 'TIMED OUT' : 'EXIT CODE ' + (e.status || 1)} — FAILED:\n${errOut.slice(0, 2000)}`;
-        }
-      }
-      return { result: output, action: 'Created', path: args.path, lines, error: cmdError ? `Command failed: ${args.command}` : null };
-    }
-
-    case 'find_and_read': {
-      try {
-        const cmd = 'rg --files --glob ' + escapeShellArg(String(args.pattern || ''))
-          + ' --glob ' + escapeShellArg('!node_modules')
-          + ' --glob ' + escapeShellArg('!.git');
-        const found = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
-        const files = found.trim().split('\n').filter(Boolean);
-        if (files.length === 0) return { result: 'No files found matching: ' + args.pattern };
-        const target = files[0];
-        // Re-validate the target through safeResolvePath. ripgrep --files
-        // can in theory follow symlinks outside cwd; we want to refuse
-        // serving up content from outside the project.
-        const safeTarget = safeResolvePath(target, cwd);
-        if (!safeTarget.ok) return { error: `find_and_read rejected: ${safeTarget.reason}` };
-        const content = fs.readFileSync(safeTarget.fullPath, 'utf-8');
-        const maxLines = args.read_lines || 50;
-        const lines = content.split('\n').slice(0, maxLines);
-        const numbered = lines.map((l, i) => `${(i+1).toString().padStart(4)}| ${sanitizeToolOutput(l)}`).join('\n');
-        let output = `Found ${files.length} files. Reading ${target} (${content.split('\n').length} lines):\n${numbered}`;
-        if (files.length > 1) output += `\n\nOther matches: ${files.slice(1, 5).join(', ')}`;
-        return { result: output };
-      } catch { return { result: 'No files found matching: ' + args.pattern }; }
-    }
-
-    case 'search_and_read': {
-      try {
-        const readCtx = Number.isInteger(args.read_context) && args.read_context > 0 && args.read_context < 200
-          ? args.read_context
-          : 10;
-        const cmd = buildCommand(
-          'rg',
-          ['--line-number', '-C', String(readCtx), '--max-count', '3'],
-          String(args.pattern || ''),
-        ) + ' . --glob ' + escapeShellArg('!node_modules') + ' --glob ' + escapeShellArg('!.git');
-        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
-        return { result: sanitizeToolOutput(output).slice(0, 4000) || 'No matches.' };
-      } catch { return { result: 'No matches found for: ' + args.pattern }; }
-    }
-
-    case 'run': {
-      // Check if the target file has interactive input that would block
-      const runMatch = args.command.match(/^(?:python3?|node|ruby)\s+["']?([^\s"']+)/);
-      if (runMatch) {
-        const targetFile = path.resolve(cwd, runMatch[1]);
-        if (fs.existsSync(targetFile)) {
-          const fileContent = fs.readFileSync(targetFile, 'utf-8');
-          if (fileContent.includes('input(') || fileContent.includes('readline') || fileContent.includes('process.stdin')) {
-            return {
-              result: `Refused: "${args.command}" — the file contains interactive input calls (input/readline/stdin) which cannot work in non-interactive mode. The file was created successfully. To verify syntax, use: python -m py_compile <file> or node --check <file>`,
-              error: 'Interactive script detected',
-              command: args.command,
-            };
-          }
-        }
-      }
-      const timeout = (args.timeout || 30) * 1000;
-      try {
-        const output = execSync(args.command, { encoding: 'utf-8', timeout, cwd, maxBuffer: 1024*1024 });
-        return { result: sanitizeToolOutput(output).slice(0, 3000) || '(completed with no output)', command: args.command };
-      } catch (e) {
-        const errOut = (e.stdout || '') + (e.stderr || e.message || '');
-        const exitReason = (e.status === null || e.status === undefined)
-          ? `Timed out (killed after ${args.timeout || 30}s)`
-          : `Exit code ${e.status || 1}`;
-        return { result: `${exitReason.toUpperCase()} — FAILED:\n${sanitizeToolOutput(errOut).slice(0, 2500)}`, error: `Command failed: ${exitReason}`, command: args.command };
-      }
-    }
+    case 'run': return await handleRun(args, cwd);
 
     case 'memory_load':
     case 'memory_remember':
@@ -1317,4 +507,4 @@ async function _executeToolInner(name, args, ctx) {
   }
 }
 
-module.exports = { executeTool };
+module.exports = { executeTool, resetTurnFallback };

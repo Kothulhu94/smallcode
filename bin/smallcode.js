@@ -538,6 +538,10 @@ function getAllTools(config, stage2Category, options = {}) {
         }
       }
     }
+    
+    // Explicitly exclude project-management tools for code_editor to prevent task drift
+    const excludeTools = new Set(['workspace_add_task', 'workspace_add_plan']);
+    filtered = filtered.filter(t => !t.function || !excludeTools.has(t.function.name));
   }
 
   try {
@@ -694,6 +698,7 @@ async function _runAgentLoopInner(userMessage, config) {
   earlyStop.newTurn();
   // Reset quality monitor's consecutive-correction window for the new turn.
   qualityMonitor.reset();
+  try { require('./executor').resetTurnFallback(); } catch {}
 
   if (config) {
     delete config.activeEscalationSummary;

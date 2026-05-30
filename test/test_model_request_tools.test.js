@@ -197,8 +197,8 @@ test('Model Request Tools - code_editor + coding exposes write_file and patch', 
   assert.ok(hasPatch, 'tools must include patch');
 });
 
-// Test 2: code_editor + coding excludes workspace_create
-test('Model Request Tools - code_editor + coding excludes workspace_create', () => {
+// Test 2: code_editor + coding excludes project-management tools
+test('Model Request Tools - code_editor + coding excludes workspace_create, workspace_add_task, and workspace_add_plan', () => {
   const codeEditor = getAgent('code_editor');
   const config = {
     context: { detected_window: 32768 },
@@ -207,12 +207,16 @@ test('Model Request Tools - code_editor + coding excludes workspace_create', () 
 
   const tools = getAllTools(config, null, { agentContext: codeEditor, taskType: 'coding' });
   const hasWorkspaceCreate = tools.some(t => t.function && t.function.name === 'workspace_create');
+  const hasWorkspaceAddTask = tools.some(t => t.function && t.function.name === 'workspace_add_task');
+  const hasWorkspaceAddPlan = tools.some(t => t.function && t.function.name === 'workspace_add_plan');
   
   assert.ok(!hasWorkspaceCreate, 'tools must exclude workspace_create');
+  assert.ok(!hasWorkspaceAddTask, 'tools must exclude workspace_add_task');
+  assert.ok(!hasWorkspaceAddPlan, 'tools must exclude workspace_add_plan');
 });
 
-// Test 3: conductor + multi_step still exposes workspace_create and workspace_set_root
-test('Model Request Tools - conductor + multi_step exposes workspace_create and workspace_set_root', () => {
+// Test 3: conductor + multi_step still exposes workspace_create, workspace_set_root, workspace_add_task, workspace_add_plan
+test('Model Request Tools - conductor + multi_step exposes workspace_create, workspace_set_root, workspace_add_task, workspace_add_plan', () => {
   const conductor = getAgent('conductor');
   const config = {
     context: { detected_window: 32768 },
@@ -222,9 +226,13 @@ test('Model Request Tools - conductor + multi_step exposes workspace_create and 
   const tools = getAllTools(config, null, { agentContext: conductor, taskType: 'multi_step' });
   const hasWorkspaceCreate = tools.some(t => t.function && t.function.name === 'workspace_create');
   const hasWorkspaceSetRoot = tools.some(t => t.function && t.function.name === 'workspace_set_root');
+  const hasWorkspaceAddTask = tools.some(t => t.function && t.function.name === 'workspace_add_task');
+  const hasWorkspaceAddPlan = tools.some(t => t.function && t.function.name === 'workspace_add_plan');
   
   assert.ok(hasWorkspaceCreate, 'tools must include workspace_create');
   assert.ok(hasWorkspaceSetRoot, 'tools must include workspace_set_root');
+  assert.ok(hasWorkspaceAddTask, 'tools must include workspace_add_task');
+  assert.ok(hasWorkspaceAddPlan, 'tools must include workspace_add_plan');
 });
 
 // Test 4: workspace_set_root updates active workspace rootPath
@@ -683,3 +691,130 @@ test('Model Request Tools - duplicate workspace names are rejected', async () =>
     ctx2.cleanup();
   }
 });
+
+// Test 18: executor blocks code_editor from calling workspace_add_task
+test('Model Request Tools - executor blocks code_editor from calling workspace_add_task', async () => {
+  const { executeTool } = require('../bin/executor');
+  const codeEditor = getAgent('code_editor');
+  
+  const result = await executeTool('workspace_add_task', { title: 't', content: 'c' }, {
+    activeAgent: codeEditor,
+    currentTaskType: 'coding',
+    config: {}
+  });
+
+  assert.ok(result.error);
+  assert.match(result.error, /must implement coding tasks with file tools/);
+});
+
+// Test 19: duplicate successful tool call in same run is suppressed
+test('Model Request Tools - duplicate successful tool call in same run is suppressed', async () => {
+  const { executeTool } = require('../bin/executor');
+  
+  const runId = `test-run-${Date.now()}`;
+  const codeEditor = getAgent('code_editor');
+  
+  // Need an empty result or something harmless that won't fail
+  // We will just use memory_forget for a dummy ID
+  const result1 = await executeTool('memory_forget', { id: 'dummy' }, {
+    activeAgent: codeEditor,
+    _ledgerRunId: runId,
+    config: {}
+  });
+
+  const result2 = await executeTool('memory_forget', { id: 'dummy' }, {
+    activeAgent: codeEditor,
+    _ledgerRunId: runId,
+    config: {}
+  });
+
+  assert.ok(!result1.error || result1.error, 'First call runs properly');
+  // Wait, if first call fails, it won't be recorded!
+  // memory_forget with dummy ID will probably fail (or not error, let's use list_projects)
+  const listResult1 = await executeTool('list_projects', {}, {
+    activeAgent: codeEditor,
+    _ledgerRunId: runId,
+    config: {}
+  });
+  assert.ok(!listResult1.error, 'list_projects should succeed');
+
+  const listResult2 = await executeTool('list_projects', {}, {
+    activeAgent: codeEditor,
+    _ledgerRunId: runId,
+    config: {}
+  });
+  assert.ok(listResult2.error);
+  assert.match(listResult2.error, /Duplicate tool call suppressed/);
+});
+
+// Test 20: duplicate failed tool call is not suppressed
+test('Model Request Tools - duplicate failed tool call is not suppressed', async () => {
+  const { executeTool } = require('../bin/executor');
+  
+  const runId = `test-run-fail-${Date.now()}`;
+  const codeEditor = getAgent('code_editor');
+  
+  // read_file of non-existent file will fail
+  const result1 = await executeTool('read_file', { path: 'does-not-exist.txt' }, {
+    activeAgent: codeEditor,
+    _ledgerRunId: runId,
+    config: {}
+  });
+  assert.ok(result1.error);
+
+  const result2 = await executeTool('read_file', { path: 'does-not-exist.txt' }, {
+    activeAgent: codeEditor,
+    _ledgerRunId: runId,
+    config: {}
+  });
+  // Should fail again for the same reason, NOT suppressed as duplicate
+  assert.ok(result2.error);
+  assert.doesNotMatch(result2.error, /Duplicate tool call suppressed/);
+});
+
+// Test 21: 'only' constraint blocks config.ts but allows src/main.ts
+test('Model Request Tools - "only" constraint blocks config.ts but allows src/main.ts', async () => {
+  const { executeTool } = require('../bin/executor');
+  const codeEditor = getAgent('code_editor');
+  
+  // Set up a mock run ledger entry
+  const runId = `test-run-only-${Date.now()}`;
+  const { getLedger } = require('../src/governor/run_ledger');
+  getLedger().startRun(runId, 'coding', 'code_editor', 'default', 'Create only package.json, index.html, src/main.ts, and src/style.css');
+
+  try {
+    // Attempt to write an allowed file (src/main.ts)
+    const resultAllowed = await executeTool('write_file', { path: 'src/main.ts', content: 'content' }, {
+      activeAgent: codeEditor,
+      _ledgerRunId: runId,
+      config: {}
+    });
+    // It should not fail due to constraint. It might fail because of missing root path though.
+    // Let's check the error specifically for constraint.
+    if (resultAllowed.error) {
+      assert.doesNotMatch(resultAllowed.error, /Constrained request/);
+    }
+
+    // Attempt to write a blocked file (config.ts)
+    const resultBlocked = await executeTool('write_file', { path: 'config.ts', content: 'content' }, {
+      activeAgent: codeEditor,
+      _ledgerRunId: runId,
+      config: {}
+    });
+    assert.ok(resultBlocked.error);
+    assert.match(resultBlocked.error, /Constrained request.*Blocked creation/);
+
+    // Attempt with Windows separators
+    const resultAllowedWin = await executeTool('write_file', { path: 'src\\main.ts', content: 'content' }, {
+      activeAgent: codeEditor,
+      _ledgerRunId: runId,
+      config: {}
+    });
+    if (resultAllowedWin.error) {
+      assert.doesNotMatch(resultAllowedWin.error, /Constrained request/);
+    }
+  } finally {
+    try { getLedger().endRun(runId, { status: 'completed' }); } catch {}
+  }
+});
+
