@@ -34,9 +34,26 @@ async function prompt_classify_task_type(input: Record<string, unknown>, ctx: Pr
   const __start = Date.now();
   const __model: ModelEntry = getModel("TinyClassifier");
   const __tier = "fixed";
-  const __template = loadExtension("tmpl_classify_task");
-  const __rendered = String(__template(...Object.values(input)));
-  const __messages = [{ role: "user" as const, content: __rendered }];
+  const systemPrompt = `Classify this user message into ONE of these categories. Reply with ONLY the category name, nothing else.
+
+Categories:
+- coding: creating new code/files
+- editing: modifying existing files
+- search: finding files or symbols
+- shell: running commands
+- explanation: answering questions, explaining concepts
+- multi_step: tasks with multiple sequential parts
+- debugging: fixing errors or bugs
+- backend: building Node.js/TypeScript backends (use BoneScript)
+
+Please reply with ONLY the category name.`;
+
+  const userMessage = String(input.user_message || "");
+  const __messages = [
+    { role: "system" as const, content: systemPrompt },
+    { role: "user" as const, content: userMessage }
+  ];
+  const __rendered = systemPrompt + "\n\nUser: " + userMessage;
   const __templateHash = createHash("sha256").update(__rendered).digest("hex").slice(0, 16);
   const __userKey = (() => {
     try { return String(createHash("sha256").update(String(input["user_message"] ?? "")).digest("hex").slice(0, 16)); }
@@ -105,6 +122,15 @@ async function prompt_classify_task_type(input: Record<string, unknown>, ctx: Pr
       if (!__report.ok) {
         const __vErr = new Error("validation failed: " + __report.issues.slice(0, 3).join("; "));
         (__vErr as Error & { __validationIssues?: string[]; __badOutput?: unknown }).__validationIssues = __report.issues;
+        (__vErr as Error & { __validationIssues?: string[]; __badOutput?: unknown }).__badOutput = __value;
+        throw __vErr;
+      }
+      const validCategories = ['coding', 'editing', 'search', 'shell', 'explanation', 'multi_step', 'debugging', 'backend'];
+      const valStr = typeof __value === 'string' ? __value : String(__value);
+      const cleanedValue = valStr.trim().toLowerCase().replace(/[.,!?]+$/, '');
+      if (!validCategories.includes(cleanedValue)) {
+        const __vErr = new Error("validation failed: output is not a valid category: " + valStr);
+        (__vErr as Error & { __validationIssues?: string[]; __badOutput?: unknown }).__validationIssues = ["invalid category"];
         (__vErr as Error & { __validationIssues?: string[]; __badOutput?: unknown }).__badOutput = __value;
         throw __vErr;
       }

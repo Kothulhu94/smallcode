@@ -51,8 +51,13 @@ export default class OpenAICompatProvider implements IModelProvider {
     // for `router.confidence_threshold`. Many openai-compatible servers
     // (vLLM, LM Studio, text-gen-webui) honour this; those that don't
     // simply ignore it and we fall back to confidence: null.
-    body.logprobs = true;
-    body.top_logprobs = 1;
+    const isLocal = this.endpoint.includes("localhost") || 
+                    this.endpoint.includes("127.0.0.1") || 
+                    this.endpoint.includes("::1");
+    if (!isLocal || process.env.SMALLCODE_LOGPROBS === "true") {
+      body.logprobs = true;
+      body.top_logprobs = 1;
+    }
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
     const res = await fetch(`${this.endpoint}/chat/completions`, {

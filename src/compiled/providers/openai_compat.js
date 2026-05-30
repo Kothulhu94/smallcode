@@ -4,8 +4,6 @@
 // endpoint. Covers vLLM, LM Studio, text-generation-webui, KoboldCPP's OAI
 // shim, and OpenAI itself when API key is set.
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.OpenAICompatProvider = void 0;
-exports.default = void 0;
 const types_1 = require("./types");
 const ssrf_guard_1 = require("./ssrf_guard");
 class OpenAICompatProvider {
@@ -51,8 +49,13 @@ class OpenAICompatProvider {
         // for `router.confidence_threshold`. Many openai-compatible servers
         // (vLLM, LM Studio, text-gen-webui) honour this; those that don't
         // simply ignore it and we fall back to confidence: null.
-        body.logprobs = true;
-        body.top_logprobs = 1;
+        const isLocal = this.endpoint.includes("localhost") ||
+            this.endpoint.includes("127.0.0.1") ||
+            this.endpoint.includes("::1");
+        if (!isLocal || process.env.SMALLCODE_LOGPROBS === "true") {
+            body.logprobs = true;
+            body.top_logprobs = 1;
+        }
         const headers = { "Content-Type": "application/json" };
         if (this.apiKey)
             headers["Authorization"] = `Bearer ${this.apiKey}`;
@@ -91,7 +94,6 @@ class OpenAICompatProvider {
         };
     }
 }
-exports.OpenAICompatProvider = OpenAICompatProvider;
 exports.default = OpenAICompatProvider;
 /**
  * Map a sequence of per-token logprobs to a single 0..1 confidence value.

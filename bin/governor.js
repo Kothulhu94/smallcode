@@ -232,6 +232,11 @@ Error that won't go away: ${errors[0] || 'unknown'}`,
 function classifyTask(userMessage) {
   const msg = userMessage.toLowerCase();
 
+  // Heuristic: explicit file creation overrides workspace routing
+  if (msg.match(/\b(create|write|make|build|add)\b/) && msg.match(/\b([a-zA-Z0-9_-]+\.(ts|js|html|css|json|py|go|md))\b/)) {
+    return 'coding';
+  }
+
   // Route project workspace management requests to Conductor (multi_step)
   if (msg.includes('workspace') && (
     msg.includes('create') || msg.includes('set') || msg.includes('active') ||
@@ -266,6 +271,10 @@ function classifyTask(userMessage) {
 // Use this when latency budget allows (~200-500ms for a TinyClassifier call,
 // 0ms on cache hit).
 async function classifyTaskAsync(userMessage) {
+  const msg = (userMessage || '').toLowerCase();
+  if (msg.match(/\b(create|write|make|build|add)\b/) && msg.match(/\b([a-zA-Z0-9_-]+\.(ts|js|html|css|json|py|go|md))\b/)) {
+    return 'coding';
+  }
   try {
     const { classifyTaskCompiled } = require('./cognition_adapter');
     return await classifyTaskCompiled(userMessage, { fallback: classifyTask });

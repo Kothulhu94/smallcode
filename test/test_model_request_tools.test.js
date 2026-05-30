@@ -818,3 +818,131 @@ test('Model Request Tools - "only" constraint blocks config.ts but allows src/ma
   }
 });
 
+// Test 22: explicit file creation routes to coding and exposes file tools
+test('Model Request Tools - file creation request routes to coding and exposes file tools', () => {
+  const { classifyTask } = require('../bin/governor');
+  const msg = 'Create exactly package.json, index.html, src/main.ts, and src/style.css in a new project workspace';
+  const taskType = classifyTask(msg);
+  assert.equal(taskType, 'coding', 'Heuristic must route explicit file creation to coding even if workspace is mentioned');
+
+  const codeEditor = getAgent('code_editor');
+  const config = {
+    context: { detected_window: 32768 },
+    model: { provider: 'openai', name: 'gpt-3.5-turbo' }
+  };
+  
+  const tools = getAllTools(config, null, { agentContext: codeEditor, taskType });
+  const hasWriteFile = tools.some(t => t.function && t.function.name === 'write_file');
+  const hasWorkspaceAddTask = tools.some(t => t.function && t.function.name === 'workspace_add_task');
+  const hasWorkspaceAddPlan = tools.some(t => t.function && t.function.name === 'workspace_add_plan');
+  
+  assert.ok(hasWriteFile, 'tools must include write_file');
+  assert.ok(!hasWorkspaceAddTask, 'tools must exclude workspace_add_task');
+  assert.ok(!hasWorkspaceAddPlan, 'tools must exclude workspace_add_plan');
+});
+
+// Test 23: classifier fallback handles "total total total" gracefully
+test('Model Request Tools - classifier fallback handles repeated garbage gracefully', async () => {
+  const { classifyTaskAsync } = require('../bin/governor');
+  const taskType = await classifyTaskAsync('total total total');
+  const validTypes = ['coding', 'editing', 'search', 'shell', 'explanation', 'multi_step', 'debugging', 'backend'];
+  assert.ok(validTypes.includes(taskType), 'Garbage text should fall back to a valid task type');
+});
+
+// Test 24: TinyClassifier config is bounded to max output 8 and stop newline
+test('Model Request Tools - TinyClassifier config is bounded to max output 8 and stop newline', () => {
+  const { getModel } = require('../src/compiled/providers');
+  const model = getModel('TinyClassifier');
+  assert.equal(model.maxOutput, 8);
+  assert.deepEqual(model.stop, ['\n']);
+  assert.equal(model.temperature, 0.2);
+});
+
+// Test 25: Local Kobold request omits logprobs/top_logprobs by default
+test('Model Request Tools - Local Kobold request omits logprobs/top_logprobs by default', async () => {
+  const OpenAICompatProvider = require('../src/compiled/providers/openai_compat').default;
+  const provider = new OpenAICompatProvider('http://localhost:5001/v1');
+  
+  const originalFetch = global.fetch;
+  let sentBody = null;
+  global.fetch = async (url, options) => {
+    sentBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'coding' } }] })
+    };
+  };
+  
+  try {
+    const originalLogprobsEnv = process.env.SMALLCODE_LOGPROBS;
+    delete process.env.SMALLCODE_LOGPROBS;
+    
+    await provider.chat({ model: 'test', messages: [{ role: 'user', content: 'test' }] });
+    assert.equal(sentBody.logprobs, undefined);
+    assert.equal(sentBody.top_logprobs, undefined);
+    
+    // Set SMALLCODE_LOGPROBS=true and assert they are sent
+    process.env.SMALLCODE_LOGPROBS = 'true';
+    await provider.chat({ model: 'test', messages: [{ role: 'user', content: 'test' }] });
+    assert.equal(sentBody.logprobs, true);
+    assert.equal(sentBody.top_logprobs, 1);
+    
+    if (originalLogprobsEnv !== undefined) {
+      process.env.SMALLCODE_LOGPROBS = originalLogprobsEnv;
+    } else {
+      delete process.env.SMALLCODE_LOGPROBS;
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+// Test 26: Classifier prompt uses system/user message role separation
+test('Model Request Tools - classifier prompt uses system/user message role separation', async () => {
+  const { getPrompt } = require('../src/compiled/cognition/prompts');
+  const promptFn = getPrompt('classify_task_type');
+  
+  const OpenAICompatProvider = require('../src/compiled/providers/openai_compat').default;
+  const originalFetch = global.fetch;
+  let sentMessages = null;
+  global.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    sentMessages = body.messages;
+    return {
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'coding' } }], usage: {} })
+    };
+  };
+  
+  try {
+    await promptFn({ user_message: 'hello' }, { trace_id: 'dummy' });
+    assert.ok(Array.isArray(sentMessages));
+    assert.equal(sentMessages.length, 2);
+    assert.equal(sentMessages[0].role, 'system');
+    assert.match(sentMessages[0].content, /Classify this user message/);
+    assert.equal(sentMessages[1].role, 'user');
+    assert.equal(sentMessages[1].content, 'hello');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+// Test 27: Obvious browser skeleton file creation short-circuits to coding
+test('Model Request Tools - obvious browser skeleton file creation short-circuits to coding', async () => {
+  const { classifyTaskAsync } = require('../bin/governor');
+  const msg = 'Create a minimal TypeScript browser project skeleton in D:\\NewGame. Create package.json, index.html, src/main.ts, and src/style.css.';
+  
+  const cognitionAdapter = require('../bin/cognition_adapter');
+  const originalGetCognition = cognitionAdapter.isCompiledCognitionAvailable;
+  // Temporarily break isCompiledCognitionAvailable so it throws if it tries to hit LLM
+  cognitionAdapter.isCompiledCognitionAvailable = () => {
+    throw new Error('LLM call should not be reached due to short-circuit');
+  };
+  
+  try {
+    const taskType = await classifyTaskAsync(msg);
+    assert.equal(taskType, 'coding');
+  } finally {
+    cognitionAdapter.isCompiledCognitionAvailable = originalGetCognition;
+  }
+});

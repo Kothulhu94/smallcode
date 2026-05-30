@@ -104,10 +104,23 @@ function renderMemoryForContext(obj) {
     }
   }
 
-  const cleanTitle = (obj.title || '').replace(/[\r\n]+/g, ' ').trim();
-  const cleanContent = (obj.content || '').replace(/[\r\n]+/g, ' ').trim();
+  let statusPrefix = '';
+  if (obj.tags && Array.isArray(obj.tags) && obj.tags.includes('evidence')) {
+    if (obj.tags.includes('validation-failed')) {
+      statusPrefix = '[VALIDATION_FAILED] ';
+    } else if (obj.tags.includes('partial-failure')) {
+      statusPrefix = '[PARTIAL_FAILURE] ';
+    } else if (obj.tags.includes('success')) {
+      statusPrefix = '[SUCCESS] ';
+    } else {
+      statusPrefix = '[UNKNOWN] ';
+    }
+  }
 
-  return `[${obj.type}:${shortId}${sourceLabel}] ${cleanTitle} — ${cleanContent}\n`;
+  const cleanTitle = (obj.title || '').replace(/[\r\n]+/g, ' ').trim();
+  const cleanContent = (obj.content || '').trim();
+
+  return `[${obj.type}:${shortId}${sourceLabel}] ${statusPrefix}${cleanTitle} —\n${cleanContent}\n`;
 }
 
 // ─── MCP Tool Definitions for Memory ─────────────────────────────────────────

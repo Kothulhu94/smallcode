@@ -5,9 +5,11 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const types_1 = require("./types");
 class PromptInjectProvider {
+    name = "prompt_inject";
+    innerName;
+    innerInstance = null;
+    injections;
     constructor(options) {
-        this.name = "prompt_inject";
-        this.innerInstance = null;
         this.innerName = options.inner;
         this.injections = options.injections || [];
     }
@@ -49,4 +51,3 @@ class PromptInjectProvider {
     }
 }
 exports.default = PromptInjectProvider;
-module.exports = PromptInjectProvider;

@@ -61,7 +61,21 @@ const {
 } = require('../src/executor/file_handlers');
 const { handleBash, handleRun } = require('../src/executor/run_handlers');
 
-
+const {
+  handleVisionScreenshot,
+  handleVisionList,
+  handleVisionDescribe,
+  handleVisionAsk
+} = require('../src/executor/vision_handlers');
+const {
+  handleMemoryLoad,
+  handleMemoryRemember,
+  handleMemoryList,
+  handleMemoryForget
+} = require('../src/executor/memory_handlers');
+const { handleBoneCompile, handleBoneCheck } = require('../src/executor/bone_handlers');
+const { handleWebSearch, handleWebFetch } = require('../src/executor/web_handlers');
+const { handleConfigureProvider, handleProviderStatus } = require('../src/executor/provider_handlers');
 
 function showMiniDiff(tui, filePath, oldStr, newStr, lineNum) {
   const diff = tui.renderDiff(filePath, oldStr, newStr, lineNum);
@@ -172,103 +186,10 @@ async function _executeToolInner(name, args, ctx) {
   }
 
   switch (name) {
-    case 'vision_screenshot': {
-      try {
-        const { saveScreenshot } = require('../src/vision/image_artifact_store');
-        const metadata = saveScreenshot();
-        return {
-          action: 'Captured',
-          imageId: metadata.imageId,
-          filePath: metadata.filePath,
-          width: metadata.width,
-          height: metadata.height,
-          byteSize: metadata.byteSize,
-          result: `Screenshot captured: ${metadata.filePath} (${metadata.width}x${metadata.height})`
-        };
-      } catch (err) {
-        return { error: `Failed to capture screenshot: ${err.message}` };
-      }
-    }
-
-    case 'vision_list': {
-      try {
-        const { listImages } = require('../src/vision/image_artifact_store');
-        const images = listImages();
-        return {
-          result: JSON.stringify(images, null, 2)
-        };
-      } catch (err) {
-        return { error: `Failed to list screenshots: ${err.message}` };
-      }
-    }
-
-    case 'vision_describe': {
-      try {
-        const { saveScreenshot } = require('../src/vision/image_artifact_store');
-        const { queryVisionModel } = require('../src/vision/vision_payload_builder');
-        
-        let imagePath = args.image_path;
-        if (!imagePath) {
-          const metadata = saveScreenshot();
-          imagePath = metadata.filePath;
-        }
-
-        const queryResult = await queryVisionModel({
-          text: "Describe this image in detail.",
-          imagePath,
-          config
-        });
-
-        if (queryResult.error) {
-          return {
-            error: queryResult.error,
-            imagePath,
-            hint: queryResult.hint
-          };
-        }
-
-        return {
-          result: queryResult.text,
-          imagePath
-        };
-      } catch (err) {
-        return { error: `Vision describe failed: ${err.message}` };
-      }
-    }
-
-    case 'vision_ask': {
-      try {
-        const { saveScreenshot } = require('../src/vision/image_artifact_store');
-        const { queryVisionModel } = require('../src/vision/vision_payload_builder');
-        
-        let imagePath = args.image_path;
-        if (!imagePath) {
-          const metadata = saveScreenshot();
-          imagePath = metadata.filePath;
-        }
-
-        const queryResult = await queryVisionModel({
-          text: args.question,
-          imagePath,
-          config
-        });
-
-        if (queryResult.error) {
-          return {
-            error: queryResult.error,
-            imagePath,
-            hint: queryResult.hint
-          };
-        }
-
-        return {
-          result: queryResult.text,
-          imagePath
-        };
-      } catch (err) {
-        return { error: `Vision ask failed: ${err.message}` };
-      }
-    }
+    case 'vision_screenshot': return await handleVisionScreenshot();
+    case 'vision_list': return await handleVisionList();
+    case 'vision_describe': return await handleVisionDescribe(args, config);
+    case 'vision_ask': return await handleVisionAsk(args, config);
 
     case 'workspace_create': return await handleWorkspaceCreate(args, ctx);
     case 'workspace_list': return await handleWorkspaceList(args, ctx);
@@ -341,107 +262,16 @@ async function _executeToolInner(name, args, ctx) {
 
     case 'run': return await handleRun(args, cwd);
 
-    case 'memory_load':
-    case 'memory_remember':
-    case 'memory_list':
-    case 'memory_forget': {
-      if (name === 'memory_load') {
-        const task = args.task || '';
-        const maxTokens = args.max_tokens || 2000;
-        // Handle both budget-aware-mcp format ({objects, tokens_used}) and
-        // fallback MemoryStore format (plain array).
-        const raw = memoryStore.loadForTask(task, maxTokens, { taskType: ctx.currentTaskType, runId: ctx._ledgerRunId });
-        const objects = Array.isArray(raw) ? raw : (raw?.objects || []);
-        const tokens_used = Array.isArray(raw) ? objects.length * 50 : (raw?.tokens_used || 0);
-        if (objects.length === 0) return { result: 'No relevant memory found.' };
-        const formatted = objects.map(o => `[${o.type}] ${o.title}: ${o.content}`).join('\n\n');
-        return { result: `Loaded ${objects.length} memories (${tokens_used} tokens):\n\n${formatted}` };
-      }
-      if (name === 'memory_remember') {
-        // Support both the budget-aware-mcp API (object arg) and fallback (positional).
-        let obj;
-        if (typeof memoryStore.remember === 'function' && memoryStore.remember.length >= 3) {
-          // Fallback MemoryStore: remember(type, title, content, opts)
-          obj = memoryStore.remember(args.type || 'context', args.title || '', args.content || '', { tags: args.tags || [] });
-        } else {
-          // budget-aware-mcp: remember({ type, title, content, tags, ... })
-          obj = memoryStore.remember({ type: args.type || 'context', title: args.title || '', content: args.content || '', tags: args.tags || [], symbols: args.symbols || [], files: args.files || [] });
-        }
-        if (obj.duplicate) return { result: `Already known (confirmed existing: ${obj.existing_id})` };
-        if (obj.rejected) return { result: `Rejected: ${obj.reason}` };
-        return { result: `Remembered [${obj.type}] "${obj.title}" (${obj.id})` };
-      }
-      if (name === 'memory_list') {
-        const objects = args.type ? memoryStore.byType(args.type) : memoryStore.all();
-        if (objects.length === 0) return { result: 'No memory stored.' };
-        return { result: objects.map(o => `[${o.id}] (${o.type}) ${o.title}`).join('\n') };
-      }
-      if (name === 'memory_forget') {
-        const ok = memoryStore.forget(args.id);
-        return { result: ok ? `Deleted ${args.id}` : `Not found: ${args.id}` };
-      }
-      return { result: '' };
-    }
+    case 'memory_load': return await handleMemoryLoad(args, memoryStore, ctx);
+    case 'memory_remember': return await handleMemoryRemember(args, memoryStore);
+    case 'memory_list': return await handleMemoryList(args, memoryStore);
+    case 'memory_forget': return await handleMemoryForget(args, memoryStore);
 
-    case 'bone_compile': {
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { error: `bone_compile rejected: ${safe.reason}` };
-      const bonePath = safe.fullPath;
-      if (!fs.existsSync(bonePath)) return { error: `File not found: ${args.path}` };
-      if (!args.path.endsWith('.bone')) return { error: `Expected a .bone file, got: ${args.path}` };
-      // Restrict the target string to a known whitelist — it gets passed
-      // straight to the compiler CLI, so an unrestricted value is a
-      // potential injection vector.
-      const allowedTargets = new Set(['express', 'nakama', 'prisma', 'sqlite']);
-      const target = String(args.target || 'express');
-      if (!allowedTargets.has(target)) {
-        return { error: `bone_compile: invalid target. Allowed: ${[...allowedTargets].join(', ')}` };
-      }
-      const compilerPaths = [path.resolve(__dirname, '..', 'node_modules', 'bonescript-compiler', 'dist', 'cli.js'), path.resolve(__dirname, '..', '..', 'BoneScript', 'compiler', 'dist', 'cli.js')];
-      let compiler = null;
-      for (const cp of compilerPaths) { if (fs.existsSync(cp)) { compiler = cp; break; } }
-      if (!compiler) return { error: 'BoneScript compiler not found.' };
-      try {
-        const cmd = 'node ' + escapeShellArg(compiler) + ' compile ' + escapeShellArg(bonePath) + ' --target ' + escapeShellArg(target);
-        const output = execSync(cmd, { encoding: 'utf-8', timeout: 30000, cwd });
-        return { result: `Compiled ${args.path} → output/\n${sanitizeToolOutput(output).slice(0, 2000)}`, action: 'Created', path: 'output/' };
-      } catch (e) {
-        return { error: `BoneScript compile failed:\n${sanitizeToolOutput((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000)}` };
-      }
-    }
+    case 'bone_compile': return await handleBoneCompile(args, cwd);
+    case 'bone_check': return await handleBoneCheck(args, cwd);
 
-    case 'bone_check': {
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { error: `bone_check rejected: ${safe.reason}` };
-      const bonePath = safe.fullPath;
-      if (!fs.existsSync(bonePath)) return { error: `File not found: ${args.path}` };
-      if (!args.path.endsWith('.bone')) return { error: `Expected a .bone file, got: ${args.path}` };
-      const compilerPaths = [path.resolve(__dirname, '..', 'node_modules', 'bonescript-compiler', 'dist', 'cli.js'), path.resolve(__dirname, '..', '..', 'BoneScript', 'compiler', 'dist', 'cli.js')];
-      let compiler = null;
-      for (const cp of compilerPaths) { if (fs.existsSync(cp)) { compiler = cp; break; } }
-      if (!compiler) return { error: 'BoneScript compiler not found.' };
-      try {
-        const cmd = 'node ' + escapeShellArg(compiler) + ' check ' + escapeShellArg(bonePath);
-        const output = execSync(cmd, { encoding: 'utf-8', timeout: 15000, cwd });
-        return { result: sanitizeToolOutput(output).trim() || '✓ No errors found.' };
-      } catch (e) {
-        return { error: `BoneScript validation errors:\n${sanitizeToolOutput((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000)}` };
-      }
-    }
-
-    case 'web_search': {
-      if (process.env.SMALLCODE_WEB_BROWSE !== 'true') return { error: 'Web browsing disabled. Set SMALLCODE_WEB_BROWSE=true.' };
-      const { webSearch } = require('../src/tools/builtin/web_browse');
-      const results = await webSearch(args.query, 5);
-      return { result: results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n') || 'No results found.' };
-    }
-
-    case 'web_fetch': {
-      if (process.env.SMALLCODE_WEB_BROWSE !== 'true') return { error: 'Web browsing disabled. Set SMALLCODE_WEB_BROWSE=true.' };
-      const { webFetch } = require('../src/tools/builtin/web_browse');
-      const content = await webFetch(args.url, 5000);
-      return { result: content || 'Failed to fetch URL.' };
-    }
+    case 'web_search': return await handleWebSearch(args);
+    case 'web_fetch': return await handleWebFetch(args);
 
     case 'select_category': {
       const category = args.category || 'read';
@@ -461,33 +291,8 @@ async function _executeToolInner(name, args, ctx) {
       }
     }
 
-    case 'configure_provider': {
-      const { runWizard } = require('./provider-wizard/wizard');
-      const hasAnyParam = args.provider || args.baseUrl || args.model || args.apiKey;
-      let result;
-      if (!hasAnyParam) {
-        result = await runWizard({ interactive: true });
-      } else {
-        result = await runWizard({
-          interactive: false,
-          provider: args.provider,
-          baseUrl: args.baseUrl,
-          model: args.model,
-          apiKey: args.apiKey,
-          escalationProvider: args.escalationProvider,
-          escalationModel: args.escalationModel,
-        });
-      }
-      if (result.success) {
-        return { result: `Provider configured: ${result.provider} (${result.baseUrl}) model=${result.model}${result.escalation ? ` escalation=${result.escalation}` : ''}. Restart SmallCode to apply.` };
-      }
-      return { error: result.error };
-    }
-
-    case 'provider_status': {
-      const { getStatus, formatStatus } = require('./provider-wizard/status');
-      return { result: formatStatus(getStatus()) };
-    }
+    case 'configure_provider': return await handleConfigureProvider(args);
+    case 'provider_status': return await handleProviderStatus();
 
     default: {
       if (mcpClient && mcpClient.isMCPTool(name)) {

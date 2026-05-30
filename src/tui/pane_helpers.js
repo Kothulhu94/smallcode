@@ -1,0 +1,132 @@
+const { ANSI } = require('./theme');
+const { highlightCode } = require('./theme');
+const { wordWrap } = require('./text_layout');
+
+function addChat(tui, role, content) {
+  tui.showWelcome = false;
+  const prefix = role === 'user'
+    ? tui.theme.accent + ' You: ' + ANSI.reset
+    : role === 'assistant'
+      ? tui.theme.success + ' AI:  ' + ANSI.reset
+      : tui.theme.muted + '      ' + ANSI.reset;
+  const contPrefix = '      ';
+  const t = tui.theme;
+
+  const rawLines = content.split('\n');
+  let inCodeBlock = false;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+
+    if (line.trim().startsWith('```')) {
+      inCodeBlock = !inCodeBlock;
+      const p = i === 0 ? prefix : contPrefix;
+      if (inCodeBlock) {
+        tui.chatLines.push(p + t.border + '┌─ ' + t.muted + line.trim().slice(3) + ANSI.reset);
+      } else {
+        tui.chatLines.push(contPrefix + t.border + '└─' + ANSI.reset);
+      }
+      continue;
+    }
+
+    const p = i === 0 ? prefix : contPrefix;
+    const maxWidth = tui.chatWidth - 7;
+
+    if (inCodeBlock) {
+      const highlighted = highlightCode(line, tui.theme);
+      tui.chatLines.push(contPrefix + t.border + '│ ' + ANSI.reset + highlighted);
+    } else {
+      const wrapped = wordWrap(line, maxWidth);
+      for (let j = 0; j < wrapped.length; j++) {
+        tui.chatLines.push((j === 0 ? p : contPrefix) + wrapped[j]);
+      }
+    }
+  }
+  tui.chatLines.push('');
+  tui.chatScroll = 0;
+  tui.msgCount++;
+
+  const MAX_CHAT_LINES = 5000;
+  if (tui.chatLines.length > MAX_CHAT_LINES) {
+    tui.chatLines.splice(0, tui.chatLines.length - MAX_CHAT_LINES);
+  }
+
+  tui.render();
+}
+
+function addTool(tui, name, status, detail) {
+  const icon = status === 'ok' ? tui.theme.success + '✓' :
+               status === 'err' ? tui.theme.error + '✗' :
+               tui.theme.accent + '⚙';
+  const nameStr = name ? tui.theme.accent + name + ANSI.reset + ' ' : '';
+  const detailStr = detail ? tui.theme.muted + detail + ANSI.reset : '';
+  const line = ` ${icon} ${ANSI.reset}${nameStr}${detailStr}`;
+
+  tui.chatLines.push(line);
+  tui.toolLines.push(line);
+  tui.chatScroll = 0;
+  tui.render();
+}
+
+function addDiff(tui, filePath, oldStr, newStr, lineNum) {
+  const t = tui.theme;
+  const maxLines = 8;
+
+  tui.chatLines.push(`${t.border}  ┌─ ${ANSI.reset}${t.accent}${filePath}:${lineNum}${ANSI.reset}`);
+
+  const oldLines = oldStr.split('\n').slice(0, maxLines);
+  const newLines = newStr.split('\n').slice(0, maxLines);
+
+  for (const line of oldLines) {
+    tui.chatLines.push(`${t.border}  │ ${ANSI.reset}${t.error}- ${line}${ANSI.reset}`);
+  }
+  if (oldStr.split('\n').length > maxLines) {
+    tui.chatLines.push(`${t.border}  │ ${ANSI.reset}${t.muted}  ... (${oldStr.split('\n').length - maxLines} more)${ANSI.reset}`);
+  }
+  for (const line of newLines) {
+    tui.chatLines.push(`${t.border}  │ ${ANSI.reset}${t.success}+ ${line}${ANSI.reset}`);
+  }
+  if (newStr.split('\n').length > maxLines) {
+    tui.chatLines.push(`${t.border}  │ ${ANSI.reset}${t.muted}  ... (${newStr.split('\n').length - maxLines} more)${ANSI.reset}`);
+  }
+
+  tui.chatLines.push(`${t.border}  └─${ANSI.reset}`);
+  tui.chatScroll = 0;
+  tui.render();
+}
+
+function streamToken(tui, token) {
+  if (tui.chatLines.length === 0 || !tui._lastLineIsStreaming) {
+    tui.chatLines.push(tui.theme.success + ' AI:  ' + ANSI.reset);
+    tui._lastLineIsStreaming = true;
+  }
+  const lastIdx = tui.chatLines.length - 1;
+  const maxWidth = tui.chatWidth - 7;
+
+  const parts = token.split('\n');
+  tui.chatLines[lastIdx] += parts[0];
+
+  if (tui._stripAnsi(tui.chatLines[lastIdx]).length > maxWidth) {
+    const full = tui.chatLines[lastIdx];
+    const prefix = '      ';
+    const stripped = tui._stripAnsi(full);
+    const wrapped = wordWrap(stripped, maxWidth);
+    tui.chatLines[lastIdx] = wrapped[0];
+    for (let w = 1; w < wrapped.length; w++) {
+      tui.chatLines.push(prefix + wrapped[w]);
+    }
+  }
+
+  for (let i = 1; i < parts.length; i++) {
+    tui.chatLines.push('      ' + parts[i]);
+  }
+  tui.chatScroll = 0;
+  tui.render();
+}
+
+module.exports = {
+  addChat,
+  addTool,
+  addDiff,
+  streamToken
+};

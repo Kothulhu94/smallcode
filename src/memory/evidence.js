@@ -108,11 +108,11 @@ function summarizeTrace(trace, options = {}) {
     lines.push(`Files: ${[...filesEdited].slice(0, 10).join(', ')}`);
   }
   if (failures.length > 0) {
-    lines.push(`\nFailed steps:`);
+    lines.push(`\nFailed tool calls:`);
     for (const f of dedupedFailures.slice(0, 5)) lines.push(`- ${f}`);
   }
   if (successes.length > 0) {
-    lines.push(`\nSuccessful steps:`);
+    lines.push(`\nSuccessful tool calls:`);
     for (const s of dedupedSuccesses.slice(0, 5)) lines.push(`- ${s}`);
   }
   if (validations > 0) {

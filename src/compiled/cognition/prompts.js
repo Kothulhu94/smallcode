@@ -23,12 +23,10 @@ const providers_1 = require("../providers");
 const budget_1 = require("./budget");
 const validate_1 = require("./validate");
 const traces_1 = require("./traces");
-const repair_1 = require("./repair");
 const cache_1 = require("./cache");
 const crypto_1 = require("crypto");
-const router_1 = require("./router");
-const { loadExtension, parseModelOutput, extractLargestFencedBlock } = require("./prompts_helpers");
-const { prompt_code_assist } = require("./prompt_code_assist");
+const prompts_helpers_1 = require("./prompts_helpers");
+const prompt_code_assist_1 = require("./prompt_code_assist");
 // Prompt: classify_task_type
 // model: TinyClassifier
 // validate: schema_only | on_invalid: retry | timeout: 3000ms
@@ -36,9 +34,25 @@ async function prompt_classify_task_type(input, ctx) {
     const __start = Date.now();
     const __model = (0, providers_1.getModel)("TinyClassifier");
     const __tier = "fixed";
-    const __template = loadExtension("tmpl_classify_task");
-    const __rendered = String(__template(...Object.values(input)));
-    const __messages = [{ role: "user", content: __rendered }];
+    const systemPrompt = `Classify this user message into ONE of these categories. Reply with ONLY the category name, nothing else.
+
+Categories:
+- coding: creating new code/files
+- editing: modifying existing files
+- search: finding files or symbols
+- shell: running commands
+- explanation: answering questions, explaining concepts
+- multi_step: tasks with multiple sequential parts
+- debugging: fixing errors or bugs
+- backend: building Node.js/TypeScript backends (use BoneScript)
+
+Please reply with ONLY the category name.`;
+    const userMessage = String(input.user_message || "");
+    const __messages = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+    ];
+    const __rendered = systemPrompt + "\n\nUser: " + userMessage;
     const __templateHash = (0, crypto_1.createHash)("sha256").update(__rendered).digest("hex").slice(0, 16);
     const __userKey = (() => {
         try {
@@ -105,13 +119,22 @@ async function prompt_classify_task_type(input, ctx) {
                 json: false,
             }, __controller.signal);
             clearTimeout(__timer);
-            const __value = parseModelOutput(__resp.content, "string");
+            const __value = (0, prompts_helpers_1.parseModelOutput)(__resp.content, "string");
             const __confidence = typeof __resp.confidence === "number" ? __resp.confidence : null;
             // validate: schema_only — structural check against string
             const __report = (0, validate_1.validateSchemaOnly)(__value, "string");
             if (!__report.ok) {
                 const __vErr = new Error("validation failed: " + __report.issues.slice(0, 3).join("; "));
                 __vErr.__validationIssues = __report.issues;
+                __vErr.__badOutput = __value;
+                throw __vErr;
+            }
+            const validCategories = ['coding', 'editing', 'search', 'shell', 'explanation', 'multi_step', 'debugging', 'backend'];
+            const valStr = typeof __value === 'string' ? __value : String(__value);
+            const cleanedValue = valStr.trim().toLowerCase().replace(/[.,!?]+$/, '');
+            if (!validCategories.includes(cleanedValue)) {
+                const __vErr = new Error("validation failed: output is not a valid category: " + valStr);
+                __vErr.__validationIssues = ["invalid category"];
                 __vErr.__badOutput = __value;
                 throw __vErr;
             }
@@ -227,7 +250,6 @@ async function prompt_classify_task_type(input, ctx) {
     }
     throw __lastError ?? new Error("Prompt classify_task_type failed after retries");
 }
-// prompt_code_assist is imported from ./prompt_code_assist
 // Prompt: compress_history
 // model: SmallCoder
 // validate: schema_only | on_invalid: retry | timeout: 30000ms
@@ -235,7 +257,7 @@ async function prompt_compress_history(input, ctx) {
     const __start = Date.now();
     const __model = (0, providers_1.getModel)("SmallCoder");
     const __tier = "fixed";
-    const __template = loadExtension("tmpl_compress_history");
+    const __template = (0, prompts_helpers_1.loadExtension)("tmpl_compress_history");
     const __rendered = String(__template(...Object.values(input)));
     const __messages = [{ role: "user", content: __rendered }];
     const __budget = ctx.budget ?? (0, budget_1.newBudget)(ctx.trace_id);
@@ -261,7 +283,7 @@ async function prompt_compress_history(input, ctx) {
                 json: false,
             }, __controller.signal);
             clearTimeout(__timer);
-            const __value = parseModelOutput(__resp.content, "string");
+            const __value = (0, prompts_helpers_1.parseModelOutput)(__resp.content, "string");
             const __confidence = typeof __resp.confidence === "number" ? __resp.confidence : null;
             // validate: schema_only — structural check against string
             const __report = (0, validate_1.validateSchemaOnly)(__value, "string");
@@ -374,7 +396,7 @@ async function prompt_compress_history(input, ctx) {
 }
 exports.PROMPTS = {
     "classify_task_type": prompt_classify_task_type,
-    "code_assist": prompt_code_assist,
+    "code_assist": prompt_code_assist_1.prompt_code_assist,
     "compress_history": prompt_compress_history,
 };
 function getPrompt(name) {

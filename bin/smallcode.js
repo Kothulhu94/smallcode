@@ -148,92 +148,9 @@ function logEvent(type, payload, tags) {
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = require('../package.json').version;
-const LOGO = `
-  ⚡ SmallCode v${VERSION}
-  AI coding agent for small LLMs
-`;
-
-// ─── Built-in MCP: code graph (delegated to mcp_bridge.js) ──────────────────
-// mcpCall, initCodeGraph, killMCP imported from ./mcp_bridge
-
-// ─── Arg Parsing ─────────────────────────────────────────────────────────────
-
-const args = process.argv.slice(2);
-const flags = {};
-const positional = [];
-
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i];
-  if (arg === '-h' || arg === '--help') flags.help = true;
-  else if (arg === '--version') flags.version = true;
-  else if (arg === '-V' || arg === '--verbose') flags.verbose = true;
-  else if (arg === '-v') flags.version = true;
-  else if (arg === '-r' || arg === '--resume') flags.resume = true;
-  else if (arg === '--mcp') flags.mcp = true;
-  else if (arg === '--acp') flags.acp = true;
-  else if (arg === '--init' || arg === 'init') flags.init = true;
-  else if (arg === '--non-interactive') flags.nonInteractive = true;
-  else if (arg === '--classic') flags.classic = true;
-  else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
-  else if (arg === '-p' || arg === '--provider') { flags.provider = args[++i]; }
-  else if (arg === '--endpoint' || arg === '--base-url') { flags.endpoint = args[++i]; }
-  else if (arg === '-P' || arg === '--prompt') { flags.prompt = args[++i]; }
-  else if (arg === '--eval') { flags.eval = args[++i] || 'classify_accuracy'; }
-  else if (arg === '--trace') { flags.trace = args[++i]; }
-  else positional.push(arg);
-}
-
-// ─── Quick exits ─────────────────────────────────────────────────────────────
-
-if (flags.version) {
-  console.log(`smallcode v${VERSION}`);
-  process.exit(0);
-}
-
-if (flags.help) {
-  console.log(`${LOGO}
-USAGE:
-  smallcode [OPTIONS] [PROMPT]
-
-OPTIONS:
-  -h, --help              Show this help
-  -v, --version           Show version
-  -V, --verbose           Verbose output (show tool I/O)
-  -m, --model <NAME>      Model to use (default: qwen2.5-coder:14b)
-  -p, --provider <NAME>   Provider (ollama, openai, anthropic, llamacpp)
-  --endpoint <URL>        OpenAI-compatible endpoint/base URL
-  -P, --prompt <TEXT>     Run a single prompt non-interactively
-  -r, --resume            Resume last active session
-  --non-interactive       Run single prompt, no TUI
-  --classic             Use classic readline TUI (no alternate screen)
-  --mcp                   Run as MCP server (JSON-RPC over stdio)
-  --eval <SUITE>          Run prompt evaluation suite
-  --trace <ID>            Replay a recorded trace
-
-COMMANDS (in TUI):
-  /quit, /q       Exit
-  /clear          Reset conversation
-  /stats          Session statistics
-  /memory         Show working memory
-  /plan           Show task plan
-  /undo           Revert last edit
-  /sessions       List saved sessions
-  /save           Save session
-  /eval           Run prompt evaluation
-  /budget         Show token budget
-  /help           All commands
-
-EXAMPLES:
-  smallcode                                Start interactive TUI
-  smallcode "fix the bug in main.ts"       Single prompt
-  smallcode -m qwen3:8b                    Use specific model
-  smallcode --resume                       Continue last session
-  smallcode --mcp                          Start as MCP server
-  echo "refactor" | smallcode --non-interactive
-`);
-  process.exit(0);
-}
+const { parseArgs, handleQuickExits, VERSION } = require('../src/cli/args_parser');
+const { flags, positional } = parseArgs(process.argv.slice(2));
+handleQuickExits(flags);
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -263,211 +180,31 @@ let _testRunnerDetector = null;
 let _knowledgeLoader = null;
 const improvementAttempts = {}; // filePath → attempt count
 
-async function runTUI(config) {
-  const createCommandHandler = require('./commands');
-  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor);
-
-  const ok = await checkOllama(config);
-  if (!ok && config.model.provider === 'ollama') {
-    process.exit(1);
-  }
-
-  // Start built-in code graph MCP
-  let graphOk = false;
-  process.stdout.write(chalk.gray('  Code graph: '));
-  graphOk = await initCodeGraph();
-  if (graphOk) {
-    console.log(chalk.green('✓ indexed'));
-  } else {
-    console.log(chalk.gray('disabled'));
-  }
-
-  // ─── FULLSCREEN TUI (default) ─────────────────────────────────────────
-  if (!flags.classic) {
-    const { FullScreenTUI } = require('../src/tui/fullscreen.js');
-
-    const screen = new FullScreenTUI({
-      model: config.model.name,
-      theme: config.tui?.theme || 'dark',
-      showToolPanel: (process.stdout.columns || 80) > 120,
-      onSubmit: async (input) => {
-        screen.setStreaming(true);
-        await runAgentLoop(input, config);
-        screen.setStreaming(false);
-        // Update token counter in status bar
-        if (tokenTracker) screen.setTokenInfo(tokenTracker.formatShort());
-      },
-      onCommand: async (cmd) => {
-        if (cmd === '/quit' || cmd === '/q' || cmd === '/exit') {
-          if (sessionStore) sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
-          screen.leave();
-          killMCP();
-          logEvent(EVENT_TYPES.SESSION_END, { reason: 'exit_command', mode: 'interactive' });
-          process.exit(0);
-        }
-        // Capture command output by temporarily redirecting stdout + console.log
-        const origWrite = process.stdout.write.bind(process.stdout);
-        const origConsoleLog = console.log;
-        let captured = '';
-        process.stdout.write = (chunk) => { captured += chunk.toString(); return true; };
-        console.log = (...args) => { captured += args.join(' ') + '\n'; };
-        // Create a mock rl for command handler
-        const mockRl = { prompt: () => {}, close: () => { screen.leave(); process.exit(0); } };
-        try {
-          await handleCmd(cmd, mockRl);
-        } catch (e) {
-          captured += `Error: ${e.message}\n`;
-        }
-        process.stdout.write = origWrite;
-        console.log = origConsoleLog;
-        if (captured.trim()) {
-          // Strip ANSI codes for clean display in chat panel
-          const clean = captured.replace(/\x1b\[[0-9;]*m/g, '').trim();
-          screen.addChat('system', clean);
-        }
-        screen.render();
-      },
-      onExit: () => {
-        // Save session before exit
-        if (sessionStore) {
-          sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
-        }
-        killMCP();
-        logEvent(EVENT_TYPES.SESSION_END, { reason: 'exit_ui', mode: 'interactive' });
-        process.exit(0);
-      },
-    });
-
-    // Enter fullscreen FIRST (captures real stdout.write as _rawWrite)
-    screen.enter();
-    _fullscreenRef = screen;
-
-    // Track current tool name for pairing stdout.write (tool start) with console.log (result)
-    let _currentToolName = '';
-
-    // Override console.log to push tool output to the screen with detail
-    const origLog = console.log;
-    console.log = (...args) => {
-      const text = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
-      const clean = text.replace(/\x1b\[[0-9;]*m/g, '').trim();
-      if (!clean) return;
-      // Skip turn summaries unless verbose
-      if (clean.startsWith('───') && !flags.verbose) return;
-      // Pair with current tool name for rich display
-      if (_currentToolName) {
-        const isError = clean.startsWith('✗') || clean.includes('Exit code') || clean.includes('Timed out');
-        screen.addTool(_currentToolName, isError ? 'err' : 'ok', clean);
-        _currentToolName = '';
-      } else {
-        screen.addTool('', 'ok', clean);
-      }
-    };
-
-    // Override process.stdout.write — capture tool name from tui.toolStart calls
-    const origStdoutWrite = process.stdout.write.bind(process.stdout);
-    process.stdout.write = (chunk) => {
-      const text = chunk.toString().replace(/\x1b\[[0-9;]*m/g, '').trim();
-      if (!text) return true;
-      // tui.toolStart outputs "  ⚙ toolName " — extract the tool name
-      const toolMatch = text.match(/^⚙\s*(\S+)/);
-      if (toolMatch) {
-        _currentToolName = toolMatch[1];
-      }
-      return true;
-    };
-
-    return; // Event loop takes over via raw stdin
-  }
-
-  // ─── CLASSIC TUI (--classic flag) ─────────────────────────────────────
-  console.log(tui.renderWelcome(config, graphOk));
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: chalk.cyan('› '),
-  });
-
-  rl.prompt();
-
-  rl.on('line', async (line) => {
-    const input = line.trim();
-    if (!input) { rl.prompt(); return; }
-
-    if (input.startsWith('/')) {
-      await handleCmd(input, rl);
-      return;
-    }
-
-    console.log('');
-    await runAgentLoop(input, config);
-    console.log('');
-    console.log(tui.renderStatus(config, conversationHistory.length));
-    rl.prompt();
-  });
-
-  rl.on('close', () => {
-    killMCP();
-    if (_lspClient) { try { _lspClient.stop(); } catch {} }
-    console.log(chalk.gray('\n  Goodbye!\n'));
-    logEvent(EVENT_TYPES.SESSION_END, { reason: 'exit_terminal', mode: 'interactive' });
-    process.exit(0);
-  });
-}
+// runTUI is extracted to src/runtime/tui_manager.js
 
 // ─── Model Communication ─────────────────────────────────────────────────────
 
 // Tool definitions imported from bin/tools.js (TOOLS, COMPOUND_TOOLS, getAllTools)
 
-// Show a compact inline diff for patch operations
-function showMiniDiff(filePath, oldStr, newStr, lineNum) {
-  const diff = tui.renderDiff(filePath, oldStr, newStr, lineNum);
-  if (diff) console.log(diff);
-}
+const _toolExecution = require('../src/runtime/tool_execution');
 
 // Execute a tool call — delegates to executor.js module.
 // Wrapped with dedup (Feature 6): identical pure-tool calls within the recent
 // window are short-circuited with a cached result. Disable with SMALLCODE_DEDUP=false.
 async function executeTool(name, args) {
-  let dedup = null;
-  try {
-    const { getDedup, ToolDedup } = require('../src/tools/dedup');
-    dedup = getDedup();
-    const cached = dedup.lookup(name, args);
-    if (cached) return ToolDedup.markCached(cached);
-  } catch {}
-
-  // Per-turn idempotent-write dedup: stop spirals where the model calls
-  // memory_remember (or memory_forget) with the same args repeatedly within
-  // a single turn. PURE_TOOLS dedup doesn't cover these — they DO mutate state
-  // and can't be cached across turns — but inside a turn they're idempotent
-  // and re-calling is always wasted work.
-  let writeSet = null;
-  try {
-    const { getIdempotentWriteSet } = require('../src/tools/dedup');
-    writeSet = getIdempotentWriteSet();
-    if (writeSet.has(name, args)) {
-      return writeSet.shortCircuitResult(name);
-    }
-  } catch {}
-
-  const result = await _executeToolModule(name, args, {
-    _fullscreenRef,
+  return _toolExecution.executeTool(name, args, {
+    _fullscreenRef: typeof _fullscreenRef !== 'undefined' ? _fullscreenRef : undefined,
     mcpCall,
     memoryStore,
     pluginLoader,
-    mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null),
+    mcpClient: typeof mcpClient !== 'undefined' ? mcpClient : null,
     flags,
     config,
     tui,
     currentTaskType,
-    _ledgerRunId: currentLedgerRunId,
-    activeAgent: currentAgentContext,
+    currentLedgerRunId,
+    currentAgentContext
   });
-
-  try { if (dedup) dedup.record(name, args, result); } catch {}
-  try { if (writeSet) writeSet.record(name, args, result); } catch {}
-  return result;
 }
 
 // ─── COMPOUND TOOLS ──────────────────────────────────────────────────────────
@@ -477,198 +214,33 @@ async function executeTool(name, args) {
 // Feature 2: Query routing — filter write tools for read-only plan steps.
 // Agent filtering: final pass intersects with currentAgentContext.allowedTools.
 function getAllTools(config, stage2Category, options = {}) {
-  const tools = _getAllToolsModule(config, stage2Category, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
-  let filtered = tools;
-  const taskType = options.taskType || currentTaskType;
-
-  // Feature 2: if plan is active and current step is a query, filter write tools
-  try {
-    if (_planTracker && _planTracker.plan && _planTracker.currentStep < _planTracker.plan.length) {
-      const { classifyAction, getToolsForActionType } = require('../src/session/action_classifier');
-      const currentStepText = _planTracker.plan[_planTracker.currentStep];
-      if (currentStepText) {
-        const actionType = classifyAction(currentStepText);
-        if (actionType === 'query') {
-          filtered = getToolsForActionType('query', tools);
-        }
-      }
-    }
-  } catch {}
-
-  // Agent permission filtering: intersect the category-filtered tool list with
-  // the active agent's allowedTools whitelist. This ensures a qa_tester cannot
-  // receive workspace_create (even when the compiled router's 'plan' category
-  // includes it), and a conductor always receives workspace_* tools.
-  // Dynamic MCP tools (mcp__ prefix or colon in name) and the two-stage category
-  // selector ('select_category') bypass this filter.
-  const agentCtx = options.agentContext || currentAgentContext;
-  if (agentCtx && Array.isArray(agentCtx.allowedTools)) {
-    const allowedSet = new Set(agentCtx.allowedTools);
-    let tempFiltered = filtered.filter(t => {
-      if (!t || !t.function) return false;
-      const name = t.function.name;
-      if (name === 'select_category' || name.startsWith('mcp__') || name.includes(':')) return true;
-      return allowedSet.has(name);
-    });
-
-    // If intersection is empty, but we had tools before filtering, it means the category-filtering
-    // was too restrictive or incompatible with this agent. Fall back to direct (un-categorized) tools.
-    if (tempFiltered.length === 0 && filtered.length > 0 && stage2Category) {
-      const fallbackTools = _getAllToolsModule(config, null, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
-      tempFiltered = fallbackTools.filter(t => {
-        if (!t || !t.function) return false;
-        const name = t.function.name;
-        if (name === 'select_category' || name.startsWith('mcp__') || name.includes(':')) return true;
-        return allowedSet.has(name);
-      });
-    }
-    filtered = tempFiltered;
-  }
-
-  // Ensure code_editor receives whitelisted core file tools on coding/backend/editing tasks
-  if (agentCtx && agentCtx.agentId === 'code_editor' && ['coding', 'backend', 'editing'].includes(taskType)) {
-    const requiredTools = ['read_file', 'write_file', 'patch', 'read_and_patch', 'create_and_run'];
-    const allowedSet = new Set(agentCtx.allowedTools);
-    const fallbackTools = _getAllToolsModule(config, null, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
-    for (const toolName of requiredTools) {
-      if (allowedSet.has(toolName) && !filtered.some(t => t.function && t.function.name === toolName)) {
-        const toolObj = fallbackTools.find(t => t.function && t.function.name === toolName);
-        if (toolObj) {
-          filtered.push(toolObj);
-        }
-      }
-    }
-    
-    // Explicitly exclude project-management tools for code_editor to prevent task drift
-    const excludeTools = new Set(['workspace_add_task', 'workspace_add_plan']);
-    filtered = filtered.filter(t => !t.function || !excludeTools.has(t.function.name));
-  }
-
-  try {
-    const { getTrustDecay } = require('../src/tools/trust_decay');
-    return getTrustDecay().filterAndSort(filtered);
-  } catch {
-    return filtered;
-  }
+  return _toolExecution.getAllTools(config, stage2Category, {
+    pluginLoader,
+    mcpClient: typeof mcpClient !== 'undefined' ? mcpClient : null,
+    taskType: options.taskType || currentTaskType,
+    agentContext: options.agentContext || currentAgentContext,
+    planTracker: typeof _planTracker !== 'undefined' ? _planTracker : null,
+    ...options
+  });
 }
 
 function buildChatRequestBody(messages, tools, config, options = {}) {
-  let target = options.target || config.activeModelTarget || getModelTarget(config, 'default');
-  let requestConfig = withModelTarget(config, target);
-  let baseUrl = options.baseUrl || target.baseUrl;
-  const currentAttempt = options.currentAttempt || 0;
-
-  const body = {
-    model: target.model,
-    messages: messages,
-    temperature: 0.1,
-    max_tokens: parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS) || 8192,
-  };
-
-  // Determine if tools are disabled
-  let toolsDisabledReason = null;
-  if (config.tools && config.tools.disabled === true) {
-    toolsDisabledReason = 'Tools are explicitly disabled in config.';
-  } else if (target && target.provider) {
-    try {
-      const { providerRegistry } = require('../src/compiled/providers/registry');
-      if (providerRegistry.has(target.provider)) {
-        const caps = providerRegistry.getCapabilities(target.provider);
-        if (caps && caps.tools === false) {
-          toolsDisabledReason = `Tools are not supported by provider '${target.provider}'.`;
-        }
-      }
-    } catch {}
-  }
-
-  // Include tools only when not disabled
-  if (toolsDisabledReason) {
-    body.__toolsDisabledReason = toolsDisabledReason;
-  } else if (tools && tools.length > 0) {
-    body.tools = tools;
-  }
-
-  // Multi-model chaining (Feature #15)
-  try {
-    const { getExecutorModel } = require('../src/model/chain');
-    body.model = getExecutorModel('', config);
-  } catch {}
-
-  // MarrowScript Rank 8: adaptive model routing
-  try {
-    const { getAdaptiveRouter } = require('../src/model/adaptive_router');
-    const router = getAdaptiveRouter();
-    const selected = router.selectModel(requestConfig);
-    if (selected.model && selected.model !== body.model) {
-      if (typeof _fullscreenRef !== 'undefined' && _fullscreenRef) {
-        _fullscreenRef.addTool?.('adaptive', 'ok', `→ ${selected.model} (high failure rate)`);
-      }
-      target = {
-        ...getModelTargetForModel(config, selected.model, selected.tier || target.tier),
-        tier: selected.tier || target.tier,
-        model: selected.model,
-        name: selected.model,
-        baseUrl: selected.url || target.baseUrl,
-      };
-      requestConfig = withModelTarget(config, target);
-      baseUrl = target.baseUrl;
-      body.model = target.model;
-    }
-  } catch {}
-
-  // Apply thinking budget
-  try {
-    const { applyThinkingBudget } = require('../src/model/thinking_budget');
-    applyThinkingBudget(body, { baseUrl });
-  } catch {}
-
-  // Fix #44b: OpenAI reasoning models
-  {
-    const _bUrl = (baseUrl || '').toLowerCase();
-    const _isOpenAICloud = _bUrl.includes('api.openai.com') || _bUrl.includes('openrouter.ai');
-    const _modelLower = String(body.model || '').toLowerCase();
-    const _isReasoning = /(^|[\/\-_])(o1|o3|o4)/.test(_modelLower);
-    if (_isOpenAICloud && _isReasoning && body.max_tokens && !body.max_completion_tokens) {
-      body.max_completion_tokens = body.max_tokens;
-      delete body.max_tokens;
-    }
-  }
-
-  // Adaptive retry temperature
-  if (currentAttempt > 0) {
-    try {
-      const { applyAdaptiveTemperature } = require('../src/model/adaptive_temp');
-      applyAdaptiveTemperature(body, currentAttempt, { isRepair: true });
-    } catch {}
-  }
-
-  return { body, target, requestConfig, baseUrl };
+  return _toolExecution.buildChatRequestBody(messages, tools, config, {
+    fullscreenRef: typeof _fullscreenRef !== 'undefined' ? _fullscreenRef : undefined,
+    ...options
+  });
 }
 let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS, ...PROVIDER_TOOLS];
 
 const MAX_TOOL_CALLS = 500;
 const MAX_IMPROVE_ITERATIONS = 2;
 
-// Estimate tokens for a message, properly accounting for tool_calls args
-// which are stored as JSON strings inside the message but are NOT in .content.
 function estimateMessageTokens(m) {
-  let chars = 0;
-  if (typeof m.content === 'string') {
-    chars += m.content.length;
-  } else if (m.content) {
-    chars += JSON.stringify(m.content).length;
-  }
-  // tool_calls messages have arguments that consume tokens but aren't in .content
-  if (m.tool_calls) {
-    for (const tc of m.tool_calls) {
-      chars += (tc.function?.name?.length || 0) + (tc.function?.arguments?.length || 0) + 20;
-    }
-  }
-  return Math.ceil(chars / 4);
+  return _toolExecution.estimateMessageTokens(m);
 }
 
 function estimateHistoryTokens(history) {
-  return history.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+  return _toolExecution.estimateHistoryTokens(history);
 }
 
 async function runAgentLoop(userMessage, config) {
@@ -2398,27 +1970,20 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
 let _lspClient = null;
 let _lspAttempted = false;
 
+const _lspServer = require('../src/api/lsp_server');
+
 async function initLSP() {
-  if (_lspAttempted) return _lspClient;
-  _lspAttempted = true;
-  try {
-    const { LSPClient } = require('../src/lsp/client');
-    const client = new LSPClient(process.cwd());
-    const ok = await client.start();
-    if (ok) {
-      _lspClient = client;
-      if (_fullscreenRef) _fullscreenRef.addTool('lsp', 'ok', `${client.serverInfo.language} language server connected`);
-    }
-  } catch {}
-  return _lspClient;
+  const client = await _lspServer.initLSP({
+    fullscreenRef: typeof _fullscreenRef !== 'undefined' ? _fullscreenRef : null
+  });
+  _lspClient = _lspServer.getLspClient();
+  return client;
 }
 
 // runValidation: delegate to the hardened version in model_client.js
 // which uses execFileSync with arg arrays (no shell injection via filePath).
-// The old inline version used shell-interpolated strings which allowed a
-// model-controlled filePath like `foo.py"; rm -rf /; echo "` to execute.
 function runValidation(filePath) {
-  return _runValidationModule(filePath);
+  return _toolExecution.runValidation(filePath);
 }
 
 // Build a compact system prompt — only includes sections relevant to the task type.
@@ -2428,820 +1993,62 @@ function runValidation(filePath) {
 // the latest user message via buildDynamicContext().
 //
 // SMALLCODE_CACHE_SPLIT defaults to true. This prevents llama.cpp KV-cache
-// invalidation: when the system prompt changes every turn (because memory/knowledge
-// is injected into it), llama.cpp discards all context checkpoints and re-processes
-// the full prompt from scratch — causing the "erased invalidated context checkpoint"
-// loop. A stable system prompt lets llama.cpp reuse its KV cache across turns.
-// Set SMALLCODE_CACHE_SPLIT=false to revert to the old behaviour.
-function buildCompactSystemPrompt(taskType, messages) {
-  const cacheSplit = process.env.SMALLCODE_CACHE_SPLIT !== 'false'; // default: true
-  const os = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
-  const osHint = process.platform === 'win32' ? '\nUse "dir" not "ls", "type" not "cat". No bash-only commands.' : '';
+const _systemPrompt = require('../src/api/system_prompt');
 
-  // Bootstrap detection (Feature 11): compact project summary at the top so
-  // the model knows its runtime, build/test commands, and entry point without
-  // burning tool calls on discovery.
-  let bootstrapLine = '';
-  try {
-    if (_bootstrapDetector) {
-      const raw = _bootstrapDetector.formatForPrompt();
-      // Prefix as a workspace hint so the model treats it as tool context,
-      // not as a project description to regurgitate when users ask questions.
-      // Without this framing models answer "tell me about the project" from
-      // the bootstrap summary instead of reading README.md.
-      if (raw) bootstrapLine = raw.replace('\n\nProject:', '\n\nWorkspace context:');
-    }
-  } catch {}
-
-  const { getActiveAgentContext: _getActiveAgentCtx } = require('../src/governor/agent_registry');
-  const agentCtx = _getActiveAgentCtx(taskType) || currentAgentContext;
-  let agentIdentityLine = '';
-  if (agentCtx) {
-    agentIdentityLine = `\n\n[ACTIVE_AGENT]\nid: ${agentCtx.agentId}\nname: ${agentCtx.name}\nrole: ${agentCtx.description}\n[/ACTIVE_AGENT]`;
-  }
-
-  let workspaceIdentityLine = '';
-  try {
-    const { getActiveWorkspace, loadWorkspaceManifest } = require('../src/governor/project_workspace');
-    const activeId = getActiveWorkspace();
-    if (activeId) {
-      const manifest = loadWorkspaceManifest(activeId);
-      workspaceIdentityLine = `\n\n[ACTIVE_WORKSPACE]\nid: ${manifest.projectId}\nname: ${manifest.name}\ngoal: ${manifest.activeGoal || 'No active goal set.'}\n[/ACTIVE_WORKSPACE]`;
-    }
-  } catch (e) {}
-
-  let prompt = `You are SmallCode, a coding agent.${agentIdentityLine}${workspaceIdentityLine}\nWorking directory: ${process.cwd()}
-OS: ${os}${osHint}${bootstrapLine}
-
-Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it. If asked about the project, read README.md or relevant files — do not answer from the workspace context line above.
-
-CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. llama.cpp's JSON parser crashes on larger tool calls. For any file over 60 lines: (1) write_file with just the skeleton (imports + empty stubs), then (2) use multiple patch calls to fill in each function/section. Never put more than 60 lines in a single write_file content field.`;
-
-  // Only add tool-use instructions for tasks that need tools
-  if (taskType !== 'explanation') {
-    prompt += `\nUse graph_search/explain_symbol for "how does X work" questions. Use list_projects for workspace overview.`;
-  }
-
-  // Only add BoneScript for backend tasks
-  if (taskType === 'backend') {
-    prompt += `\n\nFor Node.js backends: write a .bone file → bone_check → bone_compile. Don't hand-write routes.`;
-  }
-
-  if (cacheSplit) {
-    // Dynamic context goes into a separate [CONTEXT] user message — see
-    // buildDynamicContext(). Plan + plugins stay here (system role = authoritative).
-    prompt += getPluginPrompts() + getActivePlanContext() + getTestRunnerContext();
-    if (config && config.activeEscalationSummary) {
-      prompt += '\n\n' + config.activeEscalationSummary;
-    }
-    if (config && config.activeHandoffPrompt) {
-      prompt += '\n\n' + config.activeHandoffPrompt;
-    }
-    return prompt;
-  }
-
-  // Legacy behavior: everything in the system prompt
-  prompt += getMemoryContext(messages) + getSkillContext(messages) + getPluginPrompts() + getKnowledgeContext(messages) + getActivePlanContext() + getTestRunnerContext();
-
-  if (config && config.activeEscalationSummary) {
-    prompt += '\n\n' + config.activeEscalationSummary;
-  }
-  if (config && config.activeHandoffPrompt) {
-    prompt += '\n\n' + config.activeHandoffPrompt;
-  }
-
-  return prompt;
+function _getContextOptions() {
+  return {
+    testRunnerDetector: typeof _testRunnerDetector !== 'undefined' ? _testRunnerDetector : null,
+    planTracker: typeof _planTracker !== 'undefined' ? _planTracker : null,
+    knowledgeLoader: typeof _knowledgeLoader !== 'undefined' ? _knowledgeLoader : null,
+    memoryStore,
+    skillManager: typeof skillManager !== 'undefined' ? skillManager : null,
+    pluginLoader,
+    config,
+    currentTaskType,
+    currentLedgerRunId,
+    currentAgentContext,
+    _bootstrapDetector: typeof _bootstrapDetector !== 'undefined' ? _bootstrapDetector : null
+  };
 }
 
-// Build the dynamic context block that goes into a [CONTEXT] user message
-// when SMALLCODE_CACHE_SPLIT=true. Returns '' when there's no dynamic content
-// or when cache-split is disabled.
-function buildDynamicContext(messages) {
-  if (process.env.SMALLCODE_CACHE_SPLIT === 'false') return ''; // default: enabled
-  const parts = [
-    // Memory + knowledge are query-dependent → move to user message (dynamic)
-    getMemoryContext(messages),
-    getSkillContext(messages),
-    getKnowledgeContext(messages),
-    // Note: getPluginPrompts() stays in the system prompt — plugin instructions
-    //   are authoritative and should come from the system role.
-    // Note: getActivePlanContext() stays in the system prompt — the model needs
-    //   to trust plan step instructions; user-role is ignored for directives.
-    // Note: getTestRunnerContext() stays in the system prompt — it's stable and
-    //   benefits from caching alongside the static base.
-  ].filter(p => p && p.length > 0);
-  if (parts.length === 0) return '';
-  // Strip ANSI from the dynamic block — same reason we strip from messages:
-  // memory/knowledge entries can contain ANSI color codes from prior tool output.
-  const raw = `<sc:context>\n${parts.join('')}\n</sc:context>\n\n`;
-  return raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-}
+const _modelComms = require('../src/api/model_comms');
 
-// Test runner context (Feature 10): inject the detected test command once
-// so the model knows how to run tests without 3 discovery tool calls.
-function getTestRunnerContext() {
-  try {
-    if (_testRunnerDetector) return _testRunnerDetector.formatForPrompt();
-  } catch {}
-  return '';
-}
-
-// Active plan injection (Feature 8). Returns '' when no plan is active.
-function getActivePlanContext() {
-  try {
-    if (_planTracker && _planTracker.plan) {
-      return _planTracker.formatForPrompt();
-    }
-  } catch {}
-  return '';
-}
-
-// Auto-load knowledge notes (algorithm cheat sheets, syntax reminders, etc.)
-// from the project's knowledge/ directory based on keyword overlap with the
-// last user message. Disabled if the directory doesn't exist.
-function getKnowledgeContext(messages) {
-  try {
-    const lastUser = [...messages].reverse().find(m => m.role === 'user');
-    if (!lastUser || typeof lastUser.content !== 'string') return '';
-    const loader = _knowledgeLoader;
-    if (!loader) return '';
-    const maxTokens = Math.min(1500, Math.floor(((config?.context?.detected_window || 32768) * 0.04)));
-    return loader.formatForPrompt(lastUser.content, { maxTokens });
-  } catch {
-    return '';
-  }
-}
-
-// Auto-load relevant memory for the current task (injected into system prompt)
-// Fix #15: Only inject memory objects with score >= 2 (at least 2 word matches)
-// to avoid burning tokens on low-relevance hits.
-function getMemoryContext(messages) {
-  try {
-    // Get the last user message to find relevant memory
-    const lastUser = [...messages].reverse().find(m => m.role === 'user');
-    if (!lastUser || !memoryStore.loadForTask) return '';
-
-    // loadForTask returns scored objects; only include those with meaningful relevance
-    const maxTokens = Math.min(800, Math.floor(((config?.context?.detected_window || 32768) * 0.03)));
-    const objects = memoryStore.loadForTask(lastUser.content, maxTokens, { taskType: currentTaskType, runId: currentLedgerRunId, activeAgent: currentAgentContext });
-    // Handle both old format (array) and new format ({objects, tokens_used})
-    const items = Array.isArray(objects) ? objects : (objects?.objects || []);
-    if (items.length === 0) return '';
-
-    // Cap total injection to ~800 tokens (3200 chars)
-    let output = '\n\nRelevant project memory:\n';
-    let chars = output.length;
-    const maxChars = 3200;
-    const { renderMemoryForContext } = require('./memory');
-    for (const o of items) {
-      const entry = renderMemoryForContext(o);
-      if (chars + entry.length > maxChars) break;
-      output += entry;
-      chars += entry.length;
-    }
-    return output;
-  } catch {
-    return '';
-  }
-}
-
-// Auto-load relevant skills based on the user's message
-// Fix #18: Cap skill injection to ~1000 tokens (4000 chars). Multiple matching
-// skills can each be a full .md file, quickly blowing up the system prompt.
-function getSkillContext(messages) {
-  if (!skillManager) return '';
-  try {
-    const lastUser = [...messages].reverse().find(m => m.role === 'user');
-    if (!lastUser) return '';
-    const skills = skillManager.getAutoSkills(lastUser.content);
-    if (skills.length === 0) return '';
-    const formatted = skillManager.formatForPrompt(skills);
-    // Hard cap: truncate if too long
-    return formatted.length > 4000
-      ? formatted.slice(0, 4000) + '\n... (skills truncated to fit context)'
-      : formatted;
-  } catch {
-    return '';
-  }
-}
-
-// Get plugin prompt injections for the current task type
-// Fix #17: Cap plugin injection to ~500 tokens (2000 chars).
-function getPluginPrompts() {
-  if (!pluginLoader) return '';
-  try {
-    const injection = pluginLoader.getPromptInjections(currentTaskType);
-    if (!injection) return '';
-    // Hard cap: a single misconfigured plugin with 10k content shouldn't
-    // blow up the system prompt.
-    const capped = injection.length > 2000
-      ? injection.slice(0, 2000) + '\n... (plugin prompts truncated)'
-      : injection;
-    return '\n\n' + capped;
-  } catch {
-    return '';
-  }
+function _getModelCommsOptions() {
+  return {
+    currentTaskType: typeof currentTaskType !== 'undefined' ? currentTaskType : null,
+    currentToolCategory: typeof currentToolCategory !== 'undefined' ? currentToolCategory : null,
+    buildCompactSystemPrompt: (taskType, messages) => _systemPrompt.buildCompactSystemPrompt(taskType, messages, config, _getContextOptions()),
+    buildDynamicContext: (messages) => _systemPrompt.buildDynamicContext(messages, _getContextOptions()),
+    getAllTools,
+    buildChatRequestBody,
+    pluginLoader: typeof pluginLoader !== 'undefined' ? pluginLoader : null,
+    tokenTracker: typeof tokenTracker !== 'undefined' ? tokenTracker : null,
+    tokenMonitor: typeof tokenMonitor !== 'undefined' ? tokenMonitor : null,
+    traceRecorder: typeof traceRecorder !== 'undefined' ? traceRecorder : null,
+    chargeBudget: typeof chargeBudget !== 'undefined' ? chargeBudget : null,
+    sessionStore: typeof sessionStore !== 'undefined' ? sessionStore : null,
+    conversationHistory: typeof conversationHistory !== 'undefined' ? conversationHistory : null,
+    logEvent,
+    EVENT_TYPES,
+    fullscreenRef: typeof _fullscreenRef !== 'undefined' ? _fullscreenRef : null,
+    improvementAttempts: typeof improvementAttempts !== 'undefined' ? improvementAttempts : {},
+    earlyStop: typeof earlyStop !== 'undefined' ? earlyStop : null,
+  };
 }
 
 // Make a chat completion request (non-streaming for tool use, streaming for final response)
 async function chatCompletion(config, messages) {
-  let target = config.activeModelTarget || getModelTarget(config, 'default');
-  let requestConfig = withModelTarget(config, target);
-  let baseUrl = target.baseUrl;
-  const systemMsg = {
-    role: 'system',
-    content: buildCompactSystemPrompt(currentTaskType, messages),
-  };
-
-  try {
-    // Strip ANSI escape codes from all message content before sending to model.
-    // Thinking models (Qwen3, etc.) will reproduce ANSI codes they see in context,
-    // causing corrupted bash commands like "find ... -\x1b[38;2mtype f".
-    function stripAnsiFromMsg(msg) {
-      if (!msg || typeof msg.content !== 'string') return msg;
-      return { ...msg, content: msg.content.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '') };
-    }
-    const processedMessages = messages.map(stripAnsiFromMsg);
-
-    // Cache-split (Feature #14): when SMALLCODE_CACHE_SPLIT=true, dynamic
-    // context (memory, knowledge) is moved out of the system prompt and into
-    // a [CONTEXT] block prepended to the latest user message. This keeps the
-    // system prompt stable across turns so remote APIs with prefix caching
-    // (Anthropic, OpenAI) get cache hits on the static portion.
-    const dynamicCtx = buildDynamicContext(messages);
-    if (dynamicCtx) {
-      const lastIdx = processedMessages.reduce((last, m, i) => m.role === 'user' ? i : last, -1);
-      if (lastIdx >= 0) {
-        const lastMsg = processedMessages[lastIdx];
-        if (typeof lastMsg.content === 'string') {
-          processedMessages[lastIdx] = {
-            ...lastMsg,
-            content: dynamicCtx + lastMsg.content,
-          };
-        }
-        // If last user message is multimodal (image array), prepend as first text element
-        else if (Array.isArray(lastMsg.content)) {
-          const firstText = lastMsg.content.find(c => c.type === 'text');
-          if (firstText) {
-            processedMessages[lastIdx] = {
-              ...lastMsg,
-              content: [
-                { type: 'text', text: dynamicCtx + firstText.text },
-                ...lastMsg.content.filter(c => c !== firstText),
-              ],
-            };
-          }
-        }
-      }
-    }
-
-    // Transform messages with images into multimodal format
-    // OPTIMIZATION: Only re-extract images from the LAST user message (the new one).
-    // Older messages that had images already had their content consumed; re-reading
-    // the image from disk on every call is both wasteful (disk I/O) and causes
-    // context overflow (a 1MB PNG = ~330k base64 tokens sent on EVERY API call).
-    const { extractImages, formatImagesForAPI } = require('../src/session/images');
-    const { probeVisionSupport } = require('../src/vision/vision_capability_probe');
-    const probe = probeVisionSupport({ ...config, activeModelTarget: target });
-
-    let firstImagePath = null;
-    let hasImages = false;
-
-    const lastUserIdx = processedMessages.length > 0
-      ? processedMessages.reduce((last, m, i) => m.role === 'user' ? i : last, -1)
-      : -1;
-    const processedWithImages = processedMessages.map((msg, idx) => {
-      if (msg.role !== 'user' || typeof msg.content !== 'string') return msg;
-      // Only extract images from the most recent user message
-      if (idx !== lastUserIdx) return msg;
-      const images = extractImages(msg.content, process.cwd());
-      if (images.length > 0) {
-        hasImages = true;
-        firstImagePath = images[0].path;
-      }
-      if (images.length === 0 || !probe.supported) return msg;
-      return {
-        ...msg,
-        content: [
-          { type: 'text', text: msg.content },
-          ...formatImagesForAPI(images),
-        ],
-      };
-    });
-
-    if (hasImages && !probe.supported) {
-      return {
-        error: "Vision input is not supported by the active model endpoint",
-        imagePath: firstImagePath,
-        hint: "Screenshot was captured/stored, but the active model endpoint cannot analyze images."
-      };
-    }
-
-    const _tools = getAllTools(config, currentToolCategory);
-    const { body, target: finalTarget, requestConfig: finalRequestConfig, baseUrl: finalBaseUrl } = buildChatRequestBody(
-      [systemMsg, ...processedWithImages],
-      _tools,
-      config,
-      {
-        target,
-        baseUrl,
-        currentAttempt: Object.entries(improvementAttempts)
-          .filter(([k, v]) => !k.startsWith('__') && typeof v === 'number' && v > 0)
-          .reduce((acc, [, v]) => acc + v, 0),
-      }
-    );
-
-    target = finalTarget;
-    requestConfig = finalRequestConfig;
-    baseUrl = finalBaseUrl;
-
-    if (body.__toolsDisabledReason) {
-      console.log(`  \x1b[33m⚠ Tools disabled: ${body.__toolsDisabledReason}\x1b[0m`);
-    }
-
-    // Build headers — use provider-aware key routing from config.js
-    const headers = buildAuthHeaders(requestConfig);
-
-    // Timeout: abort if model doesn't respond within configured limit.
-    // Default 300s (5 min) — enough for slow hardware (RK3588, CPU inference).
-    // Override via SMALLCODE_MODEL_TIMEOUT env var (seconds) or smallcode.toml model.timeout.
-    const timeoutSecs = parseInt(process.env.SMALLCODE_MODEL_TIMEOUT)
-      || config.model?.timeout
-      || 300;
-    const timeoutMs = timeoutSecs * 1000;
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    // Spinner: show rotating ASCII while waiting for the model to respond.
-    // Gives the user clear visual feedback that the process is alive, not hung.
-    // Clears when the response arrives or on error.
-    let _spinnerInterval = null;
-    let _spinnerElapsed = 0;
-    const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    if (!_fullscreenRef && process.stdout.isTTY) {
-      let _spinFrame = 0;
-      _spinnerInterval = setInterval(() => {
-        _spinnerElapsed += 100;
-        const secs = (_spinnerElapsed / 1000).toFixed(1);
-        process.stdout.write(`\r  ${SPINNER_FRAMES[_spinFrame % SPINNER_FRAMES.length]} Waiting for model... ${secs}s \r`);
-        _spinFrame++;
-      }, 100);
-    } else if (_fullscreenRef) {
-      // In fullscreen TUI, pulse the status bar instead
-      let _spinFrame = 0;
-      _spinnerInterval = setInterval(() => {
-        _spinnerElapsed += 200;
-        _fullscreenRef.setStatus?.(`${SPINNER_FRAMES[_spinFrame % SPINNER_FRAMES.length]} thinking ${(_spinnerElapsed / 1000).toFixed(0)}s`);
-        _spinFrame++;
-      }, 200);
-    }
-    const _stopSpinner = () => {
-      if (_spinnerInterval) {
-        clearInterval(_spinnerInterval);
-        _spinnerInterval = null;
-        if (!_fullscreenRef && process.stdout.isTTY) {
-          process.stdout.write('\r' + ' '.repeat(50) + '\r'); // clear spinner line
-        } else if (_fullscreenRef) {
-          _fullscreenRef.setStatus?.('');
-        }
-      }
-    };
-
-    // Plugin hook: pre_request (before plugin provider check so it fires for all providers)
-    if (pluginLoader) {
-      await pluginLoader.runHooks('pre_request', {
-        provider: config.model.provider,
-        model: body.model || config.model.name,
-        messages: processedMessages,
-      });
-    }
-
-    // Plugin-registered providers: call directly, bypass fetch
-    const { providerRegistry } = require('../src/compiled/providers/registry');
-    const pluginProvider = providerRegistry.get(config.model.provider);
-    if (pluginProvider) {
-      _stopSpinner();
-      try {
-        const chatResp = await pluginProvider.chat({
-          model: body.model,
-          messages: body.messages,
-          temperature: body.temperature,
-          maxOutput: body.max_tokens,
-          tools: body.tools,
-        }, controller.signal);
-        clearTimeout(timeout);
-
-        // Translate ChatResponse → OpenAI-compatible format for downstream consumers
-        const data = {
-          choices: [{
-            message: {
-              role: 'assistant',
-              content: chatResp.content,
-              tool_calls: chatResp.tool_calls || [],
-            },
-            finish_reason: chatResp.tool_calls?.length ? 'tool_calls' : 'stop',
-          }],
-          usage: chatResp.usage ? {
-            prompt_tokens: chatResp.usage.promptTokens,
-            completion_tokens: chatResp.usage.completionTokens,
-            total_tokens: chatResp.usage.totalTokens,
-          } : undefined,
-        };
-
-        if (tokenTracker && data.usage) {
-          tokenTracker.record(data, config.model.name);
-        }
-        if (data.usage) {
-          tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
-          traceRecorder.recordTokens(data.usage.prompt_tokens, data.usage.completion_tokens);
-          if (chargeBudget) {
-            try { chargeBudget('run_turn', { tokens: (data.usage.prompt_tokens || 0) + (data.usage.completion_tokens || 0) }); } catch {}
-          }
-        }
-        return data;
-      } catch (pluginErr) {
-        clearTimeout(timeout);
-        const msg = pluginErr.message || 'Plugin provider failed';
-        console.log(`  \x1b[31m✗ Plugin provider "${config.model.provider}": ${msg}\x1b[0m`);
-        if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `${config.model.provider}: ${msg.slice(0, 80)}`);
-        return null;
-      }
-    }
-
-    let response;
-    try {
-      response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-    } catch (fetchErr) {
-      clearTimeout(timeout);
-      _stopSpinner();
-      if (hasImages) {
-        return {
-          error: "Vision input is not supported by the active model endpoint",
-          imagePath: firstImagePath,
-          hint: `Network/API connection failed: ${fetchErr.message}`
-        };
-      }
-      // Distinguish timeout from unreachable endpoint — show both in TUI and console
-      if (fetchErr.name === 'AbortError' || fetchErr.message?.includes('abort')) {
-        const msg = `Model timed out after ${timeoutSecs}s. The model is still processing or the endpoint is unresponsive.\n  Tip: increase timeout with SMALLCODE_MODEL_TIMEOUT=600 in your .env`;
-        console.log(`  \x1b[33m⏱ ${msg}\x1b[0m`);
-        if (_fullscreenRef) _fullscreenRef.addTool('timeout', 'err', `no response after ${timeoutSecs}s`);
-      } else {
-        // Surface the actual LM Studio / endpoint error in the TUI so the user
-        // can see what went wrong without digging through logs.
-        const errMsg = fetchErr.message || 'Connection failed';
-        const hint = errMsg.includes('ECONNREFUSED') ? ' — is LM Studio running?' :
-                     errMsg.includes('ENOTFOUND')    ? ' — check SMALLCODE_BASE_URL' :
-                     errMsg.includes('ECONNRESET')   ? ' — LM Studio may have crashed or restarted' :
-                     '';
-        console.log(`  \x1b[31m✗ Endpoint error: ${errMsg}${hint}\x1b[0m`);
-        if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `${errMsg.slice(0, 80)}${hint}`);
-      }
-      // Plugin hook: on_error
-      if (pluginLoader) {
-        await pluginLoader.runHooks('on_error', {
-          provider: config.model.provider,
-          model: body.model || config.model.name,
-          error: fetchErr,
-        }).catch(() => {});
-      }
-      return null;
-    }
-    clearTimeout(timeout);
-    _stopSpinner();
-
-    if (!response.ok) {
-      const err = await response.text();
-      // Retry once on any non-2xx response. 5xx from llama-server is often a
-      // one-off tool-call JSON parse failure that recovers on the next sampling
-      // pass; 4xx covers rate limit / model reload.
-      if (response.status >= 400) {
-        await new Promise(r => setTimeout(r, 2000));
-        try {
-          const retry = await fetch(`${baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(body),
-          });
-          if (retry.ok) return await retry.json();
-        } catch {}
-      }
-      const errDetail = err.slice(0, 200);
-      console.log(`  \x1b[31m✗ API error ${response.status}: ${errDetail}\x1b[0m`);
-      if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `HTTP ${response.status}: ${errDetail.slice(0, 80)}`);
-      // MarrowScript Rank 8: record failure for adaptive routing
-      try { const { getAdaptiveRouter } = require('../src/model/adaptive_router'); getAdaptiveRouter().recordCall(body.model || config.model.name, false); } catch {}
-      if (hasImages) {
-        return {
-          error: "Vision input is not supported by the active model endpoint",
-          imagePath: firstImagePath,
-          hint: `The endpoint rejected the image payload. Status: ${response.status}. Error: ${errDetail}`
-        };
-      }
-      return null;
-    }
-
-    const data = await response.json();
-
-    // Plugin hook: post_request
-    if (pluginLoader) {
-      await pluginLoader.runHooks('post_request', {
-        provider: config.model.provider,
-        model: body.model || config.model.name,
-        response: data,
-        usage: data?.usage || null,
-      }).catch(() => {});
-    }
-
-    // Track token usage
-    if (tokenTracker && data?.usage) {
-      tokenTracker.record(data, body.model || config.model.name);
-    }
-    if (data?.usage) {
-      tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
-      traceRecorder.recordTokens(data.usage.prompt_tokens, data.usage.completion_tokens);
-      // Feature 3: charge token budget
-      if (chargeBudget) {
-        try { chargeBudget('run_turn', { tokens: (data.usage.prompt_tokens || 0) + (data.usage.completion_tokens || 0) }); } catch {}
-      }
-    }
-
-    // MarrowScript Rank 8: record successful call for adaptive routing
-    try {
-      const { getAdaptiveRouter } = require('../src/model/adaptive_router');
-      getAdaptiveRouter().recordCall(body.model || config.model.name, true);
-    } catch {}
-
-    // Auto-save session periodically
-    if (sessionStore) {
-      sessionStore.save(conversationHistory, {
-        tokens: tokenTracker ? tokenTracker.stats() : undefined,
-      });
-      sessionStore.autoTitle(conversationHistory);
-    }
-
-    return data;
-  } catch (err) {
-    console.log(`  \x1b[31m✗ ${err.message}\x1b[0m`);
-    logEvent(EVENT_TYPES.ERROR, {
-      phase: 'chatCompletion',
-      message: err.message,
-      stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
-    });
-    if (hasImages) {
-      return {
-        error: "Vision input is not supported by the active model endpoint",
-        imagePath: firstImagePath,
-        hint: `Network/API connection failed: ${err.message}`
-      };
-    }
-    return null;
-  }
+  return _modelComms.chatCompletion(config, messages, _getModelCommsOptions());
 }
 
 // Stream a final text response (no tools, just text output)
 async function streamFinalResponse(config, messages) {
-  const target = config.activeModelTarget || getModelTarget(config, 'default');
-  const requestConfig = withModelTarget(config, target);
-  const baseUrl = target.baseUrl;
-  const systemMsg = {
-    role: 'system',
-    content: `You are SmallCode, a coding assistant. Summarize what you just did in 1-2 sentences. Be concise.`
-  };
-
-  try {
-    const headers = buildAuthHeaders(requestConfig);
-
-    // Fix #3: Only include messages that form valid pairs. Strip tool_call
-    // assistant messages that don't have a following tool result (which causes
-    // 400 errors on strict providers). Also strip tool messages whose assistant
-    // owner was already dropped by the slice.
-    const recent = messages.slice(-8);
-    const safeMessages = [];
-    for (let i = 0; i < recent.length; i++) {
-      const m = recent[i];
-      if (m.tool_calls) {
-        // Only include if ALL tool_call_ids have a matching tool result after it
-        const ids = m.tool_calls.map(tc => tc.id);
-        const hasAll = ids.every(id => recent.slice(i + 1).some(r => r.role === 'tool' && r.tool_call_id === id));
-        if (hasAll) safeMessages.push(m);
-        // else skip it
-      } else if (m.role === 'tool') {
-        // Only include if there's a preceding assistant with this tool_call_id
-        const hasOwner = safeMessages.some(s => s.tool_calls && s.tool_calls.some(tc => tc.id === m.tool_call_id));
-        if (hasOwner) safeMessages.push(m);
-        // else skip orphan
-      } else {
-        safeMessages.push(m);
-      }
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout for summary
-
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: target.model,
-        messages: [systemMsg, ...safeMessages.slice(-6)],
-        stream: true,
-        temperature: 0.1,
-        max_tokens: 256,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    if (!response.ok) return null;
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let fullContent = '';
-
-    // Start streaming display
-    if (_fullscreenRef) _fullscreenRef.setStreaming(true);
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.trim() || !line.startsWith('data: ')) continue;
-        const data = line.slice(6);
-        if (data === '[DONE]') {
-          if (_fullscreenRef) { _fullscreenRef.endStream(); _fullscreenRef.setStreaming(false); }
-          else console.log('');
-          return fullContent;
-        }
-        try {
-          const chunk = JSON.parse(data);
-          const delta = chunk.choices?.[0]?.delta;
-          if (delta?.content) {
-            if (_fullscreenRef) {
-              _fullscreenRef.streamToken(delta.content);
-            } else {
-              process.stdout.write(delta.content);
-            }
-            fullContent += delta.content;
-
-            // Early-stop: check for repetition loops during streaming
-            const stopSignal = earlyStop.checkRepetition(fullContent);
-            if (stopSignal) {
-              if (_fullscreenRef) { _fullscreenRef.endStream(); _fullscreenRef.setStreaming(false); }
-              else console.log(`\n  \x1b[33m⚡ ${stopSignal.message}\x1b[0m`);
-              return fullContent;
-            }
-          }
-        } catch {}
-      }
-    }
-    if (_fullscreenRef) { _fullscreenRef.endStream(); _fullscreenRef.setStreaming(false); }
-    else console.log('');
-    return fullContent;
-  } catch (err) {
-    logEvent(EVENT_TYPES.ERROR, {
-      phase: 'streamFinalResponse',
-      message: err.message,
-      stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
-    });
-    return null;
-  }
+  return _modelComms.streamFinalResponse(config, messages, _getModelCommsOptions());
 }
 
 // Streaming version for when no tools are needed (direct responses)
 async function sendToModel(message, config) {
-  const target = config.activeModelTarget || getModelTarget(config, 'default');
-  const requestConfig = withModelTarget(config, target);
-  const baseUrl = target.baseUrl || process.env.OLLAMA_HOST || 'http://localhost:11434';
-  const systemPrompt = `You are SmallCode, a coding assistant. You help users by reading, editing, and creating code files.
-Rules:
-- Read files before editing them.
-- Use search-and-replace for edits. Never rewrite entire files.
-- Keep responses concise and focused.
-- If a task is complex, break it into steps.`;
-
-  // OpenAI-compatible (LM Studio, vLLM, etc.)
-  if (target.provider === 'openai' || baseUrl.includes('/v1')) {
-    try {
-      const headers = buildAuthHeaders(requestConfig);
-
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: target.model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: message },
-          ],
-          stream: true,
-          temperature: 0.1,
-          max_tokens: 4096,
-        }),
-      });
-
-      if (!response.ok) {
-        const err = await response.text();
-        console.log(`  ✗ LM Studio error: ${response.status} ${err.slice(0, 200)}`);
-        return;
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.trim() || !line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') { console.log(''); return; }
-          try {
-            const chunk = JSON.parse(data);
-            const delta = chunk.choices?.[0]?.delta;
-            if (delta?.content) {
-              process.stdout.write(delta.content);
-            }
-          } catch {}
-        }
-      }
-      console.log('');
-    } catch (err) {
-      console.log(`  ✗ Error: ${err.message}`);
-      logEvent(EVENT_TYPES.ERROR, {
-        phase: 'sendToModelOpenAI',
-        message: err.message,
-        stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
-      });
-    }
-    return;
-  }
-
-  // Ollama native endpoint
-  try {
-    const host = baseUrl.replace(/\/v1$/, '') || process.env.OLLAMA_HOST || 'http://localhost:11434';
-    const response = await fetch(`${host}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: target.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: message },
-        ],
-        stream: true,
-      }),
-    });
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const chunk = JSON.parse(line);
-          if (chunk.message && chunk.message.content) {
-            process.stdout.write(chunk.message.content);
-          }
-          if (chunk.done) { console.log(''); return; }
-        } catch {}
-      }
-    }
-  } catch (err) {
-    console.log(`  ✗ Error: ${err.message}`);
-    logEvent(EVENT_TYPES.ERROR, {
-      phase: 'sendToModelOllama',
-      message: err.message,
-      stackSummary: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
-    });
-  }
+  return _modelComms.sendToModel(message, config, _getModelCommsOptions());
 }
 
 // ─── Non-Interactive Mode ────────────────────────────────────────────────────
@@ -3300,189 +2107,32 @@ async function runNonInteractive(config, prompt) {
 
 // ─── MCP Server Mode ─────────────────────────────────────────────────────────
 
-function runMCP() {
-  // Minimal MCP server implementation over stdio.
-  // Tool calls are handled async — we buffer the response and write it
-  // when the handler resolves. This fixes the bug where smallcode_agent
-  // (which calls the async runAgentLoop) would return before completing.
-  const rl = readline.createInterface({ input: process.stdin });
+const _mcpServer = require('../src/api/mcp_server');
 
-  rl.on('line', async (line) => {
-    try {
-      const request = JSON.parse(line);
-      const response = await handleMCPRequest(request);
-      console.log(JSON.stringify(response));
-    } catch (err) {
-      console.log(JSON.stringify({
-        jsonrpc: '2.0',
-        id: null,
-        error: { code: -32700, message: 'Parse error' }
-      }));
-    }
-  });
+function runMCP() {
+  _mcpServer.runMCP();
 }
 
 async function handleMCPRequest(request) {
-  const { id, method } = request;
-  switch (method) {
-    case 'initialize':
-      return { jsonrpc: '2.0', id, result: {
-        protocolVersion: '2024-11-05',
-        capabilities: { tools: {} },
-        serverInfo: { name: 'smallcode', version: VERSION },
-      }};
-    case 'tools/list':
-      return { jsonrpc: '2.0', id, result: { tools: [
-        { name: 'smallcode_read_file', description: 'Read file contents', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' } }, required: ['path'] } },
-        { name: 'smallcode_search', description: 'Search code with regex', inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' } }, required: ['pattern'] } },
-        { name: 'smallcode_patch', description: 'Edit file via search-and-replace', inputSchema: { type: 'object', properties: { path: { type: 'string' }, old_str: { type: 'string' }, new_str: { type: 'string' } }, required: ['path', 'old_str', 'new_str'] } },
-        { name: 'smallcode_bash', description: 'Run shell command', inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
-        { name: 'smallcode_memory_load', description: 'Load relevant project memory for a task', inputSchema: { type: 'object', properties: { task: { type: 'string' } }, required: ['task'] } },
-        { name: 'smallcode_memory_remember', description: 'Save knowledge to project memory', inputSchema: { type: 'object', properties: { type: { type: 'string' }, title: { type: 'string' }, content: { type: 'string' } }, required: ['type', 'title', 'content'] } },
-        { name: 'smallcode_agent', description: 'Send a prompt to SmallCode agent', inputSchema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] } },
-      ]}};
-    case 'tools/call':
-      return await handleMCPToolCall(id, request.params);
-    default:
-      return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown method: ${method}` }};
-  }
+  return _mcpServer.handleMCPRequest(request);
 }
 
 async function handleMCPToolCall(id, params) {
-  const { name, arguments: args } = params;
-  const { safeResolvePath, escapeShellArg, sanitizeToolOutput } = require('../src/security/sanitize');
-  const cwd = process.cwd();
-  let result = '';
-
-  switch (name) {
-    case 'smallcode_read_file': {
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${safe.reason}` }], isError: true }};
-      try { result = sanitizeToolOutput(fs.readFileSync(safe.fullPath, 'utf-8')); }
-      catch (e) { return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true }}; }
-      break;
-    }
-    case 'smallcode_bash': {
-      const { execSync } = require('child_process');
-      const command = String(args.command || '');
-      // Apply same blocked-command checks as the agent's bash tool
-      if (/rm\s+-rf\s+\/[^.]/.test(command) || /format\s+c:/i.test(command)) {
-        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'Error: destructive command blocked' }], isError: true }};
-      }
-      try {
-        const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
-        result = sanitizeToolOutput(output).slice(0, 4000);
-      } catch (e) { result = sanitizeToolOutput((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000); }
-      break;
-    }
-    case 'smallcode_search': {
-      const { execSync } = require('child_process');
-      const pattern = String(args.pattern || '');
-      const searchPath = args.path ? safeResolvePath(args.path, cwd) : { ok: true, fullPath: '.' };
-      if (!searchPath.ok) { result = `Error: ${searchPath.reason}`; break; }
-      try {
-        const cmd = 'rg --line-number --max-count 10 ' + escapeShellArg(pattern) + ' ' + escapeShellArg(searchPath.fullPath || '.');
-        result = sanitizeToolOutput(execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd })).slice(0, 3000);
-      } catch { result = 'No matches'; }
-      break;
-    }
-    case 'smallcode_patch': {
-      const safe = safeResolvePath(args.path, cwd);
-      if (!safe.ok) { result = `Error: ${safe.reason}`; break; }
-      try {
-        let content = fs.readFileSync(safe.fullPath, 'utf-8');
-        if (!content.includes(args.old_str)) { result = 'Error: old_str not found'; break; }
-        const count = content.split(args.old_str).length - 1;
-        if (count > 1) { result = `Error: old_str matches ${count} locations`; break; }
-        content = content.replace(args.old_str, args.new_str);
-        fs.writeFileSync(safe.fullPath, content);
-        result = `Patched ${args.path}`;
-      } catch (e) { result = `Error: ${e.message}`; }
-      break;
-    }
-    case 'smallcode_memory_load': {
-      if (currentTaskType) {
-        const { authorizeToolForAgent } = require('../src/governor/agent_registry');
-        const auth = authorizeToolForAgent(name, currentTaskType);
-        if (auth.authorized === false) {
-          result = auth.reason;
-          break;
-        }
-      }
-      const objects = memoryStore.loadForTask(args.task || '', 2000, { taskType: currentTaskType, runId: currentLedgerRunId });
-      // Handle both array return (MemoryStore in memory.js) and {objects} return
-      const items = Array.isArray(objects) ? objects : (objects?.objects || []);
-      result = items.length > 0
-        ? items.map(o => `[${o.type}] ${o.title}: ${o.content}`).join('\n\n')
-        : 'No relevant memory found.';
-      break;
-    }
-    case 'smallcode_memory_remember': {
-      if (currentTaskType) {
-        const { authorizeToolForAgent } = require('../src/governor/agent_registry');
-        const auth = authorizeToolForAgent(name, currentTaskType);
-        if (auth.authorized === false) {
-          result = auth.reason;
-          break;
-        }
-      }
-      const obj = memoryStore.remember(args.type || 'context', args.title || '', args.content || '', { tags: args.tags || [] });
-      if (obj.duplicate) {
-        result = `Already known (confirmed existing: ${obj.existing_id})`;
-      } else if (obj.rejected) {
-        result = `Rejected: ${obj.reason}`;
-      } else {
-        result = `Remembered: [${obj.type}] ${obj.title} (${obj.id})`;
-      }
-      break;
-    }
-    default:
-      result = `Unknown tool: ${name}`;
-  }
-
-  return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: result }] }};
+  return _mcpServer.handleMCPToolCall(id, params, {
+    currentTaskType: typeof currentTaskType !== 'undefined' ? currentTaskType : null,
+    currentLedgerRunId: typeof currentLedgerRunId !== 'undefined' ? currentLedgerRunId : null,
+    memoryStore
+  });
 }
 
 // ─── Minimal TUI (no model — plugin commands only) ──────────────────────────
 
-async function startMinimalTUI() {
-  const readline = require('readline');
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: chalk.cyan('smallcode> '),
-  });
-
-  const createCommandHandler = require('./commands');
-  const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, escalationEngine, null);
-
-  rl.prompt();
-
-  rl.on('line', async (line) => {
-    const input = line.trim();
-    if (!input) { rl.prompt(); return; }
-
-    if (input === '/exit' || input === '/quit') {
-      console.log(chalk.gray('\n  Goodbye.\n'));
-      rl.close();
-      process.exit(0);
-    }
-
-    if (input.startsWith('/')) {
-      await handleCmd(input, rl);
-      return;
-    }
-
-    console.log(chalk.gray('  No model configured. Type /provider to set up, or /exit to quit.'));
-    rl.prompt();
-  });
-
-  rl.on('close', () => process.exit(0));
-}
+// startMinimalTUI is extracted to src/runtime/tui_manager.js
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
+  const { startMinimalTUI, runTUI } = require('../src/runtime/tui_manager');
   config = loadConfig();
 
   // Initialize plugins early so they can handle setup (e.g. /provider wizard)
@@ -3490,24 +2140,8 @@ async function main() {
   await pluginLoader.runInit({ config, cwd: process.cwd() });
   skillManager = new SkillManager(process.cwd());
 
-  // Check model is configured
-  if (!config.model.name) {
-    // Allow /provider commands even without a model configured
-    const providerArg = positional.find(a => a === '/provider' || a === '/provider/status' || a === 'provider');
-    if (providerArg) {
-      const cmd = providerArg.startsWith('/') ? providerArg : '/provider';
-      const rest = positional.filter(a => a !== providerArg).join(' ');
-      const createCommandHandler = require('./commands');
-      const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, null, null);
-      const mockRl = { prompt: () => {}, close: () => {}, on: () => {}, question: (q, cb) => cb('') };
-      await handleCmd(rest ? `${cmd} ${rest}` : cmd, mockRl);
-      return;
-    }
-    console.log('\n  ⚡ SmallCode — no model configured.\n');
-    console.log('  Type /provider to configure a model, or /provider status to check.\n');
-    startMinimalTUI();
-    return;
-  }
+  const { handleMissingModel, handleProviderCommand, runEvalMode, initializeSession } = require('../src/cli/bootstrap_helpers');
+  if (await handleMissingModel(config, positional, () => startMinimalTUI(logEvent, EVENT_TYPES, config))) return;
 
   // Initialize escalation engine
   escalationEngine = new EscalationEngine(config.escalation || {});
@@ -3549,26 +2183,7 @@ async function main() {
   sessionStore = new SessionStore(process.cwd());
   tokenTracker = new TokenTracker();
 
-  // Resume or create session
-  if (flags.resume) {
-    const resumed = sessionStore.resume();
-    if (resumed) {
-      conversationHistory.push(...resumed.messages);
-      // Clear improvement state from previous session — stale counters
-      // cause false-positive patch spirals and decompose triggers.
-      Object.keys(improvementAttempts).forEach(k => delete improvementAttempts[k]);
-    }
-  }
-  if (!sessionStore.current) {
-    sessionStore.create(config.model.name);
-  }
-
-  try {
-    journal = openJournal(sessionStore.current.id, process.cwd());
-    logEvent(EVENT_TYPES.SESSION_START, { model: config.model.name, mode: flags.nonInteractive ? 'non-interactive' : 'interactive' });
-  } catch (e) {
-    journal = null;
-  }
+  journal = initializeSession(flags, config, sessionStore, conversationHistory, improvementAttempts, logEvent, EVENT_TYPES, process.cwd());
 
   if (!flags.mcp) {
     try {
@@ -3593,17 +2208,7 @@ async function main() {
 
   // Eval mode: run prompt evaluation suites
   if (flags.eval) {
-    const { EvalRunner } = require('./eval_runner');
-    const evalRunner = new EvalRunner(config);
-    console.log(`\n  Running evaluation: ${flags.eval}\n`);
-    const results = await evalRunner.run(flags.eval, { chatCompletionFn: chatCompletion });
-    if (results.error) {
-      console.log(`  \x1b[31m✗ ${results.error}\x1b[0m`);
-    } else {
-      console.log(EvalRunner.format(results));
-      console.log('');
-    }
-    process.exit(results.error ? 1 : 0);
+    await runEvalMode(flags, config, chatCompletion);
   }
 
   if (flags.acp) {
@@ -3614,16 +2219,7 @@ async function main() {
   }
 
   // Handle /provider even when model IS configured (must come before positional prompt)
-  const providerArg = positional.find(a => a === '/provider' || a === '/provider/status' || a === 'provider');
-  if (providerArg) {
-    const cmd = providerArg.startsWith('/') ? providerArg : '/provider';
-    const rest = positional.filter(a => a !== providerArg).join(' ');
-    const createCommandHandler = require('./commands');
-    const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, null, null);
-    const mockRl = { prompt: () => {}, close: () => {}, on: () => {}, question: (q, cb) => cb('') };
-    await handleCmd(rest ? `${cmd} ${rest}` : cmd, mockRl);
-    return;
-  }
+  if (await handleProviderCommand(config, positional)) return;
 
   if (flags.nonInteractive || flags.prompt || positional.length > 0) {
     const prompt = flags.prompt || positional.join(' ');
@@ -3631,7 +2227,28 @@ async function main() {
     return;
   }
 
-  await runTUI(config);
+  await runTUI({
+    config,
+    flags,
+    conversationHistory,
+    improvementAttempts,
+    runAgentLoop,
+    runValidation,
+    MAX_IMPROVE_ITERATIONS,
+    memoryStore,
+    escalationEngine,
+    tokenMonitor,
+    tokenTracker,
+    sessionStore,
+    killMCP,
+    logEvent,
+    EVENT_TYPES,
+    tui,
+    checkOllama,
+    initCodeGraph,
+    _lspClient,
+    setFullscreenRef: (screen) => _fullscreenRef = screen
+  });
 }
 
 if (require.main === module) {

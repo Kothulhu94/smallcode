@@ -392,7 +392,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/model')} <name>  ${chalk.gray('Switch model mid-session')}`);
         console.log(`  ${chalk.cyan('/endpoint')} <u>  ${chalk.gray('Switch API endpoint')}`);
         console.log(`  ${chalk.cyan('/stats')}         ${chalk.gray('Model, history, cwd')}`);
-        console.log(`  ${chalk.cyan('/files')}         ${chalk.gray('List project files')}`);
+        console.log(`  ${chalk.cyan('/files')} [path]   ${chalk.gray('List project or directory files')}`);
         console.log(`  ${chalk.cyan('/diff')}          ${chalk.gray('Git diff summary')}`);
         console.log(`  ${chalk.cyan('/git')} <cmd>     ${chalk.gray('Run any git command')}`);
         console.log(`  ${chalk.cyan('/loop')} <file>   ${chalk.gray('Validate + auto-fix')}`);

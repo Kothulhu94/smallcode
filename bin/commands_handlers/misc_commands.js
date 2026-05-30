@@ -156,35 +156,53 @@ async function handleMcp(ctx) {
 }
 
 async function handleFiles(ctx) {
-  const { rl } = ctx;
+  const { rl, parts } = ctx;
   const { getActiveTargetRoot } = require('../../src/governor/project_workspace');
-  const targetRoot = getActiveTargetRoot();
-
+  
   let listDir = null;
   let label = '';
 
-  if (!targetRoot.ok) {
-    if (targetRoot.reason === 'no_active_workspace') {
-      // No workspace active — fall back to harness root with a clear label
-      listDir = process.cwd();
-      label = chalk.yellow('  [No active workspace — showing harness root files]');
-    } else if (targetRoot.reason === 'no_root_path') {
-      console.log(chalk.yellow('  Active workspace has no target project root set.'));
-      console.log(chalk.gray('  Use workspace_create with a rootPath argument, or set one via the model.'));
-      console.log('');
-      rl.prompt();
-      return;
-    } else {
-      // invalid_root_path
-      console.log(chalk.red(`  Active workspace rootPath is invalid: ${targetRoot.detail || 'unknown error'}`));
-      console.log(chalk.gray('  Update the workspace rootPath to a valid absolute directory.'));
+  // 1. Support explicit path: /files <path>
+  if (parts.length > 1) {
+    const requestedPath = parts.slice(1).join(' ');
+    listDir = path.resolve(process.cwd(), requestedPath);
+    if (!fs.existsSync(listDir) || !fs.statSync(listDir).isDirectory()) {
+      console.log(chalk.red(`  Invalid directory: ${listDir}`));
       console.log('');
       rl.prompt();
       return;
     }
+    label = chalk.cyan(`  [Directory: ${listDir}]`);
   } else {
-    listDir = targetRoot.rootPath;
-    label = chalk.green(`  [Workspace project root: ${listDir}]`);
+    // 2. Default to active workspace root
+    const targetRoot = getActiveTargetRoot();
+
+    if (!targetRoot.ok) {
+      if (targetRoot.reason === 'no_active_workspace') {
+        console.log(chalk.yellow('  No active workspace.'));
+        console.log(chalk.gray('  Use /files <path> to list a specific directory,'));
+        console.log(chalk.gray('  or use the model to create a workspace (e.g. "Create a workspace for my project at C:\\path")'));
+        console.log('');
+        rl.prompt();
+        return;
+      } else if (targetRoot.reason === 'no_root_path') {
+        console.log(chalk.yellow('  Active workspace has no target project root set.'));
+        console.log(chalk.gray('  Use workspace_create with a rootPath argument, or set one via the model.'));
+        console.log('');
+        rl.prompt();
+        return;
+      } else {
+        // invalid_root_path
+        console.log(chalk.red(`  Active workspace rootPath is invalid: ${targetRoot.detail || 'unknown error'}`));
+        console.log(chalk.gray('  Update the workspace rootPath to a valid absolute directory.'));
+        console.log('');
+        rl.prompt();
+        return;
+      }
+    } else {
+      listDir = targetRoot.rootPath;
+      label = chalk.green(`  [Workspace project root: ${listDir}]`);
+    }
   }
 
   console.log(label);

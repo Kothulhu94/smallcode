@@ -25,7 +25,7 @@ Categories:
 
 User message: "${user_message}"
 
-Category:`;
+Please reply with ONLY the category name.`;
   // <marrowscript:ext:tmpl_classify_task:end>
 }
 
