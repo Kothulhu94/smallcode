@@ -41,7 +41,8 @@ const DEFAULT_AGENTS = {
     },
     canEditFiles: false,
     canRunShell: false,
-    requiresApproval: true
+    requiresApproval: true,
+    thinkingEnabled: true
   },
   repo_navigator: {
     id: 'repo_navigator',
@@ -80,7 +81,8 @@ const DEFAULT_AGENTS = {
     },
     canEditFiles: true,
     canRunShell: true,
-    requiresApproval: true
+    requiresApproval: true,
+    thinkingEnabled: true
   },
   qa_tester: {
     id: 'qa_tester',
@@ -101,7 +103,8 @@ const DEFAULT_AGENTS = {
     },
     canEditFiles: false,
     canRunShell: true,
-    requiresApproval: true
+    requiresApproval: true,
+    thinkingEnabled: true
   },
   researcher: {
     id: 'researcher',
@@ -156,7 +159,8 @@ const DEFAULT_AGENTS = {
     },
     canEditFiles: true,
     canRunShell: false,
-    requiresApproval: true
+    requiresApproval: true,
+    thinkingEnabled: true
   },
   visual_observer: {
     id: 'visual_observer',

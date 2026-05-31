@@ -112,6 +112,48 @@ const SENSITIVE_PATH_RE = [
   /[/\\]\.kube[/\\]config$/i,
 ];
 
+function normalizeWindowsPath(p) {
+  if (typeof p !== 'string') return p;
+  let normalized = p.replace(/\//g, '\\');
+  if (/^[a-zA-Z]:/.test(normalized)) {
+    normalized = normalized[0].toUpperCase() + normalized.slice(1);
+  }
+  if (normalized.endsWith('\\') && normalized.length > 3) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized;
+}
+
+function normalizeRelativePathOrPattern(input, cwd) {
+  if (typeof input !== 'string') return input;
+  let checkInput = input;
+  let checkCwd = cwd;
+  if (process.platform === 'win32') {
+    checkInput = normalizeWindowsPath(input);
+    checkCwd = normalizeWindowsPath(cwd);
+  }
+
+  let isContained = false;
+  if (checkInput === checkCwd) {
+    isContained = true;
+  } else if (checkInput.startsWith(checkCwd)) {
+    const nextChar = checkInput.charAt(checkCwd.length);
+    if (nextChar === '/' || nextChar === '\\') {
+      isContained = true;
+    }
+  }
+
+  if (isContained) {
+    let rel = checkInput.slice(checkCwd.length);
+    while (rel.startsWith('/') || rel.startsWith('\\')) {
+      rel = rel.slice(1);
+    }
+    if (rel === "") return ".";
+    return rel.replace(/\\/g, '/');
+  }
+  return input;
+}
+
 /**
  * Resolve a user-supplied path safely against `cwd`.
  * Returns { ok: true, fullPath, displayPath } on success,
@@ -139,6 +181,40 @@ function safeResolvePath(reqPath, cwd, options = {}) {
   }
   // Strip leading ./ for normalization
   candidate = candidate.replace(/^\.[/\\]/, '');
+
+  if (process.platform === 'win32') {
+    candidate = normalizeWindowsPath(candidate);
+    const normCwd = normalizeWindowsPath(path.resolve(cwd));
+    const fullPath = normalizeWindowsPath(path.resolve(normCwd, candidate));
+
+    // Sensitive path check
+    for (const re of SENSITIVE_PATH_RE) {
+      if (re.test(fullPath)) {
+        return { ok: false, reason: 'path is sensitive (auth credentials)' };
+      }
+    }
+
+    if (!options.allowOutside) {
+      const rel = path.relative(normCwd, fullPath);
+      // Windows separator containment check: rel must not start with ..
+      // and must not be an absolute path (meaning it resolved to another drive or root)
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        return { ok: false, reason: 'path resolves outside project root' };
+      }
+      
+      // Secondary check: verify the lowercase version of the prefix matches exactly
+      // to prevent directory traversal/sibling folder attacks (e.g. D:\NewGame2 matching D:\NewGame)
+      const normCwdLower = normCwd.toLowerCase() + (normCwd.endsWith('\\') ? '' : '\\');
+      const fullPathLower = fullPath.toLowerCase() + (fullPath.endsWith('\\') ? '' : '\\');
+      if (!fullPathLower.startsWith(normCwdLower) && fullPath.toLowerCase() !== normCwd.toLowerCase()) {
+        return { ok: false, reason: 'path resolves outside project root' };
+      }
+    }
+
+    const displayPath = path.relative(normCwd, fullPath) || path.basename(fullPath);
+    return { ok: true, fullPath, displayPath };
+  }
+
   const fullPath = path.resolve(cwd, candidate);
 
   // Sensitive path check
@@ -272,6 +348,54 @@ function createLineDemuxer(stream) {
   };
 }
 
+function globSearchFallback(pattern, cwd) {
+  const fs = require('fs');
+  const path = require('path');
+  
+  const globToRegExp = (glob) => {
+    let reStr = glob
+      .replace(/\\/g, '/')
+      .replace(/\*\*\//g, '___DOUBLE_STAR_SLASH___')
+      .replace(/\*\*/g, '___DOUBLE_STAR___')
+      .replace(/\*/g, '___SINGLE_STAR___')
+      .replace(/\?/g, '___QUESTION___');
+      
+    reStr = reStr.replace(/[\-\[\]\(\)\{\}\+\.\^\$\|]/g, '\\$&');
+    
+    reStr = reStr
+      .replace(/___DOUBLE_STAR_SLASH___/g, '(?:.*/)?')
+      .replace(/___DOUBLE_STAR___/g, '.*')
+      .replace(/___SINGLE_STAR___/g, '[^/]*')
+      .replace(/___QUESTION___/g, '[^/]');
+      
+    return new RegExp('^' + reStr + '$');
+  };
+
+  
+  const files = [];
+  const walk = (dir) => {
+    let list;
+    try { list = fs.readdirSync(dir); } catch { return; }
+    for (const file of list) {
+      if (file === 'node_modules' || file === '.git') continue;
+      const full = path.join(dir, file);
+      let stat;
+      try { stat = fs.statSync(full); } catch { continue; }
+      if (stat.isDirectory()) {
+        walk(full);
+      } else {
+        const relative = path.relative(cwd, full).replace(/\\/g, '/');
+        files.push(relative);
+      }
+    }
+  };
+  
+  walk(cwd);
+  
+  const regex = globToRegExp(pattern);
+  return files.filter(f => regex.test(f));
+}
+
 module.exports = {
   redactString,
   redactValue,
@@ -284,4 +408,7 @@ module.exports = {
   SECRET_PATTERNS,
   ALWAYS_REDACT_KEYS,
   SENSITIVE_PATH_RE,
+  normalizeWindowsPath,
+  normalizeRelativePathOrPattern,
+  globSearchFallback,
 };

@@ -1,14 +1,15 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const { sanitizeToolOutput, safeResolvePath, escapeShellArg } = require('../security/sanitize');
+const { sanitizeToolOutput, safeResolvePath, escapeShellArg, normalizeRelativePathOrPattern, globSearchFallback } = require('../security/sanitize');
 const { getReadTracker } = require('../tools/read_tracker');
 const { getFileStateTracker } = require('../session/file_state');
 const { getSnapshotManager } = require('../session/snapshot');
 
 function showMiniDiff(tui, filePath, oldStr, newStr, lineNum) {
   if (!tui) return;
-  tui.showMiniDiff(filePath, oldStr, newStr, lineNum);
+  const diff = tui.renderDiff(filePath, oldStr, newStr, lineNum);
+  if (diff) console.log(diff);
 }
 
 async function handleReadFile(args, cwd) {
@@ -298,11 +299,17 @@ async function handleCreateAndRun(args, cwd) {
 
 async function handleFindAndRead(args, cwd) {
   try {
-    const cmd = 'rg --files --glob ' + escapeShellArg(String(args.pattern || ''))
-      + ' --glob ' + escapeShellArg('!node_modules')
-      + ' --glob ' + escapeShellArg('!.git');
-    const found = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
-    const files = found.trim().split('\n').filter(Boolean);
+    const pattern = normalizeRelativePathOrPattern(args.pattern, cwd);
+    let files = [];
+    try {
+      const cmd = 'rg --files --glob ' + escapeShellArg(String(pattern || ''))
+        + ' --glob ' + escapeShellArg('!node_modules')
+        + ' --glob ' + escapeShellArg('!.git');
+      const found = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
+      files = found.trim().split('\n').filter(Boolean);
+    } catch {
+      files = globSearchFallback(pattern, cwd);
+    }
     if (files.length === 0) return { result: 'No files found matching: ' + args.pattern };
     const target = files[0];
     // Re-validate the target through safeResolvePath. ripgrep --files

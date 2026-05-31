@@ -24,17 +24,27 @@ function validateTargetRoot(rootPath, opts = {}) {
     throw new Error('rootPath must be a non-empty string.');
   }
 
+  let candidate = rootPath;
+  if (process.platform === 'win32') {
+    const { normalizeWindowsPath } = require('../security/sanitize');
+    candidate = normalizeWindowsPath(candidate);
+  }
+
   // Reject path traversal sequences before resolve()
-  if (rootPath.includes('..')) {
+  if (candidate.includes('..')) {
     throw new Error(`rootPath contains directory traversal sequence: "${rootPath}".`);
   }
 
   // Must be absolute
-  if (!path.isAbsolute(rootPath)) {
+  if (!path.isAbsolute(candidate)) {
     throw new Error(`rootPath must be an absolute path. Got: "${rootPath}".`);
   }
 
-  const resolved = path.resolve(rootPath);
+  let resolved = path.resolve(candidate);
+  if (process.platform === 'win32') {
+    const { normalizeWindowsPath } = require('../security/sanitize');
+    resolved = normalizeWindowsPath(resolved);
+  }
 
   if (mustExist && !fs.existsSync(resolved)) {
     throw new Error(`rootPath does not exist on disk: "${resolved}".`);

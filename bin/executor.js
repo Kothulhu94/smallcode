@@ -15,6 +15,8 @@ const {
   safeResolvePath,
   sanitizeToolOutput,
   stripAnsi: secStripAnsi,
+  normalizeRelativePathOrPattern,
+  globSearchFallback,
 } = require('../src/security/sanitize');
 const { getShell } = require('../src/tools/shell_session');
 const { getReadTracker } = require('../src/tools/read_tracker');
@@ -231,19 +233,25 @@ async function _executeToolInner(name, args, ctx) {
 
     case 'find_files': {
       try {
+        const pattern = normalizeRelativePathOrPattern(args.pattern, cwd);
         // Smart listing (Feature #17): if no glob pattern, use scored file tree
         // instead of dumping everything. With a pattern, use rg as before.
-        if (!args.pattern || args.pattern === '*' || args.pattern === '**') {
+        if (!pattern || pattern === '*' || pattern === '**' || pattern === '.') {
           const { formatSmartListing } = require('../src/tools/file_tree');
           const hint = args.hint || ''; // caller can pass a hint for keyword scoring
           const listing = formatSmartListing(cwd, hint, { max: 50 });
           return { result: listing };
         }
-        const cmd = 'rg --files --glob ' + escapeShellArg(String(args.pattern || ''))
-          + ' --glob ' + escapeShellArg('!node_modules')
-          + ' --glob ' + escapeShellArg('!.git');
-        const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
-        const files = output.trim().split('\n').filter(Boolean).slice(0, 30);
+        let files = [];
+        try {
+          const cmd = 'rg --files --glob ' + escapeShellArg(String(pattern || ''))
+            + ' --glob ' + escapeShellArg('!node_modules')
+            + ' --glob ' + escapeShellArg('!.git');
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 10000, cwd });
+          files = output.trim().split('\n').filter(Boolean).slice(0, 30);
+        } catch {
+          files = globSearchFallback(pattern, cwd).slice(0, 30);
+        }
         return { result: files.length ? `Found ${files.length} files:\n${files.join('\n')}` : 'No files found.' };
       } catch { return { result: 'No files found.' }; }
     }

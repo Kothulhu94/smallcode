@@ -21,6 +21,7 @@ async function chatCompletion(config, messages, options = {}) {
     EVENT_TYPES,
     fullscreenRef,
     improvementAttempts,
+    agentContext,
   } = options;
 
   let target = config.activeModelTarget || getModelTarget(config, 'default');
@@ -89,6 +90,7 @@ async function chatCompletion(config, messages, options = {}) {
         target,
         baseUrl,
         currentAttempt: attempts,
+        agentContext,
       }
     );
 

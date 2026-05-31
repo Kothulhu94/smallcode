@@ -149,6 +149,12 @@ function buildChatRequestBody(messages, tools, config, options = {}) {
     } catch {}
   }
 
+  const agentCtx = options.agentContext;
+  if (agentCtx && (agentCtx.thinkingEnabled === true || agentCtx.agent?.thinkingEnabled === true)) {
+    body.chat_template_kwargs = body.chat_template_kwargs || {};
+    body.chat_template_kwargs.thinking_enabled = true;
+  }
+
   return { body, target, requestConfig, baseUrl };
 }
 

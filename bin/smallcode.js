@@ -2033,6 +2033,7 @@ function _getModelCommsOptions() {
     fullscreenRef: typeof _fullscreenRef !== 'undefined' ? _fullscreenRef : null,
     improvementAttempts: typeof improvementAttempts !== 'undefined' ? improvementAttempts : {},
     earlyStop: typeof earlyStop !== 'undefined' ? earlyStop : null,
+    agentContext: typeof currentAgentContext !== 'undefined' ? currentAgentContext : null,
   };
 }
 

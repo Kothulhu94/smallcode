@@ -65,6 +65,24 @@ async function chatCompletion(ctx) {
       body.tools = _tools;
     }
 
+    const { getActiveAgentContext, getAgent } = require('../src/governor/agent_registry');
+    let agentCtx = null;
+    if (ctx.activeAgent) {
+      if (typeof ctx.activeAgent === 'string') {
+        agentCtx = getAgent(ctx.activeAgent);
+      } else if (typeof ctx.activeAgent === 'object') {
+        agentCtx = ctx.activeAgent;
+      }
+    }
+    if (!agentCtx && ctx.currentTaskType) {
+      agentCtx = getActiveAgentContext(ctx.currentTaskType);
+    }
+
+    if (agentCtx && (agentCtx.thinkingEnabled === true || agentCtx.agent?.thinkingEnabled === true)) {
+      body.chat_template_kwargs = body.chat_template_kwargs || {};
+      body.chat_template_kwargs.thinking_enabled = true;
+    }
+
     const headers = buildAuthHeaders(requestConfig);
 
     const response = await fetch(`${baseUrl}/chat/completions`, {
