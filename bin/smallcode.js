@@ -1042,6 +1042,27 @@ async function _runAgentLoopInner(userMessage, config) {
         }
       } catch {}
     }
+    // Transition restricted agents (like repo_navigator or conductor) immediately if they attempt code writing or shell execution.
+    if (message.tool_calls && message.tool_calls.length > 0 && currentAgentContext) {
+      const hasWriteOrShellTool = message.tool_calls.some(tc => {
+        const name = tc?.function?.name || '';
+        const { classifyTool } = require('../src/governor/agent_registry');
+        const c = classifyTool(name);
+        return (c.isFileWrite && !currentAgentContext.canEditFiles) || (c.isShell && !currentAgentContext.canRunShell);
+      });
+      if (hasWriteOrShellTool) {
+        failureState.denials = Math.max(failureState.denials, 2);
+        const escalated = triggerAgentEscalation('authorization_denial', { toolName: message.tool_calls[0].function.name });
+        if (escalated) {
+          if (escalated === 'terminal') {
+            terminalFailureReached = true;
+            break;
+          }
+          conversationHistory.push({ role: 'system', content: `[AGENT-TRANSITION] Transitioned to ${currentAgentContext.name} agent. Re-read the tool schemas and invoke them with correct arguments.` });
+          continue;
+        }
+      }
+    }
 
     // ── QUALITY MONITOR (itsy port) ──────────────────────────────────────
     // Catches structural failure modes the model emitted on this turn:

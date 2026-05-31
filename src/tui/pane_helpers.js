@@ -14,6 +14,7 @@ function addChat(tui, role, content) {
 
   const rawLines = content.split('\n');
   let inCodeBlock = false;
+  const newLines = [];
 
   for (let i = 0; i < rawLines.length; i++) {
     const line = rawLines[i];
@@ -22,9 +23,9 @@ function addChat(tui, role, content) {
       inCodeBlock = !inCodeBlock;
       const p = i === 0 ? prefix : contPrefix;
       if (inCodeBlock) {
-        tui.chatLines.push(p + t.border + '┌─ ' + t.muted + line.trim().slice(3) + ANSI.reset);
+        newLines.push(p + t.border + '┌─ ' + t.muted + line.trim().slice(3) + ANSI.reset);
       } else {
-        tui.chatLines.push(contPrefix + t.border + '└─' + ANSI.reset);
+        newLines.push(contPrefix + t.border + '└─' + ANSI.reset);
       }
       continue;
     }
@@ -34,23 +35,17 @@ function addChat(tui, role, content) {
 
     if (inCodeBlock) {
       const highlighted = highlightCode(line, tui.theme);
-      tui.chatLines.push(contPrefix + t.border + '│ ' + ANSI.reset + highlighted);
+      newLines.push(contPrefix + t.border + '│ ' + ANSI.reset + highlighted);
     } else {
       const wrapped = wordWrap(line, maxWidth);
       for (let j = 0; j < wrapped.length; j++) {
-        tui.chatLines.push((j === 0 ? p : contPrefix) + wrapped[j]);
+        newLines.push((j === 0 ? p : contPrefix) + wrapped[j]);
       }
     }
   }
-  tui.chatLines.push('');
-  tui.chatScroll = 0;
+  newLines.push('');
+  tui.appendToChatBuffer(newLines);
   tui.msgCount++;
-
-  const MAX_CHAT_LINES = 5000;
-  if (tui.chatLines.length > MAX_CHAT_LINES) {
-    tui.chatLines.splice(0, tui.chatLines.length - MAX_CHAT_LINES);
-  }
-
   tui.render();
 }
 
@@ -59,45 +54,71 @@ function addTool(tui, name, status, detail) {
                status === 'err' ? tui.theme.error + '✗' :
                tui.theme.accent + '⚙';
   const nameStr = name ? tui.theme.accent + name + ANSI.reset + ' ' : '';
-  const detailStr = detail ? tui.theme.muted + detail + ANSI.reset : '';
-  const line = ` ${icon} ${ANSI.reset}${nameStr}${detailStr}`;
 
-  tui.chatLines.push(line);
-  tui.toolLines.push(line);
-  tui.chatScroll = 0;
+  const headerLine = ` ${icon} ${ANSI.reset}${nameStr}`;
+  const newLines = [];
+  if (detail) {
+    const detailLines = String(detail).split('\n');
+    for (let i = 0; i < detailLines.length; i++) {
+      const dLine = detailLines[i];
+      const maxWidth = tui.chatWidth - 5;
+      const wrapped = wordWrap(dLine, maxWidth);
+      for (let j = 0; j < wrapped.length; j++) {
+        if (i === 0 && j === 0) {
+          newLines.push(headerLine + tui.theme.muted + wrapped[j] + ANSI.reset);
+        } else {
+          newLines.push('   ' + tui.theme.muted + wrapped[j] + ANSI.reset);
+        }
+      }
+    }
+  } else {
+    newLines.push(headerLine);
+  }
+
+  tui.appendToChatBuffer(newLines);
+
+  const toolLine = ` ${icon} ${ANSI.reset}${nameStr}${detail ? tui.theme.muted + String(detail).replace(/\n/g, ' ') + ANSI.reset : ''}`;
+  tui.toolLines.push(toolLine);
+  const MAX_TOOL_LINES = 1000;
+  if (tui.toolLines.length > MAX_TOOL_LINES) {
+    tui.toolLines.shift();
+  }
+
   tui.render();
 }
 
 function addDiff(tui, filePath, oldStr, newStr, lineNum) {
   const t = tui.theme;
   const maxLines = 8;
+  const diffLines = [];
 
-  tui.chatLines.push(`${t.border}  ┌─ ${ANSI.reset}${t.accent}${filePath}:${lineNum}${ANSI.reset}`);
+  diffLines.push(`${t.border}  ┌─ ${ANSI.reset}${t.accent}${filePath}:${lineNum}${ANSI.reset}`);
 
   const oldLines = oldStr.split('\n').slice(0, maxLines);
-  const newLines = newStr.split('\n').slice(0, maxLines);
+  const newLinesList = newStr.split('\n').slice(0, maxLines);
 
   for (const line of oldLines) {
-    tui.chatLines.push(`${t.border}  │ ${ANSI.reset}${t.error}- ${line}${ANSI.reset}`);
+    diffLines.push(`${t.border}  │ ${ANSI.reset}${t.error}- ${line}${ANSI.reset}`);
   }
   if (oldStr.split('\n').length > maxLines) {
-    tui.chatLines.push(`${t.border}  │ ${ANSI.reset}${t.muted}  ... (${oldStr.split('\n').length - maxLines} more)${ANSI.reset}`);
+    diffLines.push(`${t.border}  │ ${ANSI.reset}${t.muted}  ... (${oldStr.split('\n').length - maxLines} more)${ANSI.reset}`);
   }
-  for (const line of newLines) {
-    tui.chatLines.push(`${t.border}  │ ${ANSI.reset}${t.success}+ ${line}${ANSI.reset}`);
+  for (const line of newLinesList) {
+    diffLines.push(`${t.border}  │ ${ANSI.reset}${t.success}+ ${line}${ANSI.reset}`);
   }
   if (newStr.split('\n').length > maxLines) {
-    tui.chatLines.push(`${t.border}  │ ${ANSI.reset}${t.muted}  ... (${newStr.split('\n').length - maxLines} more)${ANSI.reset}`);
+    diffLines.push(`${t.border}  │ ${ANSI.reset}${t.muted}  ... (${newStr.split('\n').length - maxLines} more)${ANSI.reset}`);
   }
 
-  tui.chatLines.push(`${t.border}  └─${ANSI.reset}`);
-  tui.chatScroll = 0;
+  diffLines.push(`${t.border}  └─${ANSI.reset}`);
+
+  tui.appendToChatBuffer(diffLines);
   tui.render();
 }
 
 function streamToken(tui, token) {
   if (tui.chatLines.length === 0 || !tui._lastLineIsStreaming) {
-    tui.chatLines.push(tui.theme.success + ' AI:  ' + ANSI.reset);
+    tui.appendToChatBuffer([tui.theme.success + ' AI:  ' + ANSI.reset]);
     tui._lastLineIsStreaming = true;
   }
   const lastIdx = tui.chatLines.length - 1;
@@ -112,15 +133,22 @@ function streamToken(tui, token) {
     const stripped = tui._stripAnsi(full);
     const wrapped = wordWrap(stripped, maxWidth);
     tui.chatLines[lastIdx] = wrapped[0];
+    
+    const extra = [];
     for (let w = 1; w < wrapped.length; w++) {
-      tui.chatLines.push(prefix + wrapped[w]);
+      extra.push(prefix + wrapped[w]);
     }
+    tui.appendToChatBuffer(extra);
   }
 
-  for (let i = 1; i < parts.length; i++) {
-    tui.chatLines.push('      ' + parts[i]);
+  if (parts.length > 1) {
+    const extra = [];
+    for (let i = 1; i < parts.length; i++) {
+      extra.push('      ' + parts[i]);
+    }
+    tui.appendToChatBuffer(extra);
   }
-  tui.chatScroll = 0;
+
   tui.render();
 }
 

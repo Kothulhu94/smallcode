@@ -20,11 +20,6 @@ async function handleKeypress(tui, data) {
     return;
   }
 
-  if (key === '\x04') {
-    tui.leave();
-    tui.onExit();
-    return;
-  }
 
   if (key === '\r' || key === '\n') {
     if (tui.commandPaletteOpen) {
@@ -138,14 +133,38 @@ async function handleKeypress(tui, data) {
 
   if (key === '\x1b[5~' || key === '\x1b[1;2A') {
     const maxBack = -(Math.max(0, tui.chatLines.length - tui.chatHeight));
-    const step = key === '\x1b[1;2A' ? 3 : Math.floor(tui.chatHeight / 2);
+    const step = key === '\x1b[1;2A' ? 3 : tui.chatHeight;
     tui.chatScroll = Math.max(maxBack, tui.chatScroll - step);
     tui.render();
     return;
   }
   if (key === '\x1b[6~' || key === '\x1b[1;2B') {
-    const step = key === '\x1b[1;2B' ? 3 : Math.floor(tui.chatHeight / 2);
+    const step = key === '\x1b[1;2B' ? 3 : tui.chatHeight;
     tui.chatScroll = Math.min(0, tui.chatScroll + step);
+    tui.render();
+    return;
+  }
+  if (key === '\x15') {
+    const maxBack = -(Math.max(0, tui.chatLines.length - tui.chatHeight));
+    const step = Math.floor(tui.chatHeight / 2);
+    tui.chatScroll = Math.max(maxBack, tui.chatScroll - step);
+    tui.render();
+    return;
+  }
+  if (key === '\x04') {
+    const step = Math.floor(tui.chatHeight / 2);
+    tui.chatScroll = Math.min(0, tui.chatScroll + step);
+    tui.render();
+    return;
+  }
+  if (key === '\x1b[H' || key === '\x1b[1~' || key === '\x1bOH') {
+    const maxBack = -(Math.max(0, tui.chatLines.length - tui.chatHeight));
+    tui.chatScroll = maxBack;
+    tui.render();
+    return;
+  }
+  if (key === '\x1b[F' || key === '\x1b[4~' || key === '\x1bOF') {
+    tui.chatScroll = 0;
     tui.render();
     return;
   }

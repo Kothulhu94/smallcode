@@ -234,7 +234,7 @@ function renderStatus(tui) {
   const left = tui.statusMsg
     ? ` ${tui.statusMsg}`
     : ` enter send  shift+drag copy`;
-  const scrollInfo = tui.chatScroll < 0 ? `  ↑ scrolled` : '';
+  const scrollInfo = tui.chatScroll < 0 ? '  [scrolled up — End to follow live output]' : '';
   const tokenStr = tui.tokenInfo ? `  ${tui.tokenInfo}` : '';
   const right = ` smallcode  ${tui.model}  ${tui.isStreaming ? '⟳' : '●'} `;
   const padding = tui.width - left.length - scrollInfo.length - tokenStr.length - right.length;

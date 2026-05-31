@@ -183,8 +183,37 @@ class FullScreenTUI {
 
   endStream() {
     this._lastLineIsStreaming = false;
-    this.chatLines.push('');
+    this.appendToChatBuffer(['']);
     this.render();
+  }
+
+  appendToChatBuffer(lines) {
+    if (typeof lines === 'string') {
+      lines = lines.split('\n');
+    }
+    const n = lines.length;
+    if (n === 0) return;
+
+    const atBottom = this.chatScroll === 0;
+    this.chatLines.push(...lines);
+
+    if (!atBottom) {
+      this.chatScroll -= n;
+    }
+
+    const maxLines = 10000;
+    if (this.chatLines.length > maxLines) {
+      const overflow = this.chatLines.length - maxLines;
+      this.chatLines.splice(0, overflow);
+      if (this.chatScroll < 0) {
+        this.chatScroll = Math.min(0, this.chatScroll + overflow);
+      }
+    }
+
+    const maxBack = -Math.max(0, this.chatLines.length - (this.chatHeight || 20));
+    if (this.chatScroll < maxBack) {
+      this.chatScroll = maxBack;
+    }
   }
 
   _truncate(str, maxLen) { return truncateString(str, maxLen); }

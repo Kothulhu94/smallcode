@@ -310,7 +310,16 @@ function resolveEscalationTarget(activeAgent, reasonType, context) {
   let target = 'conductor'; // default fallback
 
   if (reasonType === 'authorization_denial') {
-    target = 'conductor';
+    const toolName = context?.toolName || '';
+    const isFileEdit = ['write_file', 'append_file', 'patch', 'read_and_patch', 'create_and_run'].includes(toolName);
+    const isShell = ['bash', 'run'].includes(toolName);
+    if (isFileEdit) {
+      target = 'code_editor';
+    } else if (isShell) {
+      target = 'qa_tester';
+    } else {
+      target = 'conductor';
+    }
   } else if (reasonType === 'repeated_tool_failure') {
     const toolName = context?.toolName;
     const isFileEdit = ['write_file', 'append_file', 'patch', 'read_and_patch', 'create_and_run'].includes(toolName);
